@@ -7,4 +7,9 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
   },
+  environments: {
+    client: {
+      build: { rollupOptions: { input: "./src/entry-client.tsx" } },
+    },
+  },
 });
