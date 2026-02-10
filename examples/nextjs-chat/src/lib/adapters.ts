@@ -214,6 +214,7 @@ export function buildAdapters(): Adapters {
         apiSecret: process.env.X_API_SECRET,
         accessToken: process.env.X_ACCESS_TOKEN as string,
         accessTokenSecret: process.env.X_ACCESS_TOKEN_SECRET as string,
+        webhookId: process.env.X_WEBHOOK_ID,
         userName: "Chat SDK Bot",
         logger: logger.child("x"),
       }),

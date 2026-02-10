@@ -26,6 +26,8 @@ export interface XAdapterConfig {
   userName?: string;
   /** Bot user ID (auto-detected if not provided) */
   botUserId?: string;
+  /** Webhook ID from X developer dashboard. Enables auto-subscription to Account Activity API events. */
+  webhookId?: string;
 }
 
 // ---------------------------------------------------------------------------

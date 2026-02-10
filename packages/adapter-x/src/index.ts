@@ -33,12 +33,20 @@ import type {
   XThreadId,
   XWebhookPayload,
 } from "./types";
-import { handleCrcChallenge, verifyWebhookSignature } from "./webhook";
+import {
+  handleCrcChallenge,
+  subscribeUser,
+  verifyWebhookSignature,
+} from "./webhook";
 
 export { XFormatConverter } from "./markdown";
 // Re-export public types
 export type { XAdapterConfig, XThreadId } from "./types";
-export { handleCrcChallenge, verifyWebhookSignature } from "./webhook";
+export {
+  handleCrcChallenge,
+  subscribeUser,
+  verifyWebhookSignature,
+} from "./webhook";
 
 export class XAdapter implements Adapter<XThreadId, unknown> {
   readonly name = "x";
@@ -46,13 +54,18 @@ export class XAdapter implements Adapter<XThreadId, unknown> {
 
   // biome-ignore lint/suspicious/noExplicitAny: XDK Client type is complex
   private client: any;
+  private apiKey: string;
   private apiSecret: string;
+  private accessToken: string;
+  private accessTokenSecret: string;
+  private webhookId: string | null;
   private chat: ChatInstance | null = null;
   private logger: Logger;
   private _botUserId: string | null = null;
   private _botScreenName: string | null = null;
   private formatConverter = new XFormatConverter();
   private static CONVERSATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+  private static SUBSCRIPTION_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
   /** Bot user ID used for mention detection and liking */
   get botUserId(): string | undefined {
@@ -60,7 +73,11 @@ export class XAdapter implements Adapter<XThreadId, unknown> {
   }
 
   constructor(config: XAdapterConfig) {
+    this.apiKey = config.apiKey;
     this.apiSecret = config.apiSecret;
+    this.accessToken = config.accessToken;
+    this.accessTokenSecret = config.accessTokenSecret;
+    this.webhookId = config.webhookId || null;
     this.logger = config.logger;
     this.userName = config.userName || "bot";
     this._botUserId = config.botUserId || null;
@@ -103,6 +120,72 @@ export class XAdapter implements Adapter<XThreadId, unknown> {
         this.logger.warn("Could not fetch bot user info from X", { error });
       }
     }
+
+    // Auto-subscribe to webhook if webhookId is configured
+    if (this.webhookId) {
+      await this.ensureUserSubscribed();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Webhook subscription
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Ensure the authenticated user is subscribed to the configured webhook.
+   * Uses KV cache with 24h TTL to avoid redundant API calls on serverless
+   * cold starts. Re-subscribes automatically once per day (idempotent).
+   */
+  private async ensureUserSubscribed(): Promise<void> {
+    if (!this.webhookId || !this.chat) {
+      return;
+    }
+
+    const cacheKey = `x:subscribed:${this.webhookId}`;
+
+    // Check KV cache first
+    try {
+      const cached = await this.chat.getState().get<boolean>(cacheKey);
+      if (cached) {
+        this.logger.debug("X webhook subscription cached, skipping API call", {
+          webhookId: this.webhookId,
+        });
+        return;
+      }
+    } catch (error) {
+      this.logger.warn("Could not check subscription cache", { error });
+      // Fall through to attempt subscription
+    }
+
+    // Subscribe via X API
+    try {
+      this.logger.info("Subscribing to X webhook", {
+        webhookId: this.webhookId,
+      });
+
+      const result = await subscribeUser(this.webhookId, {
+        apiKey: this.apiKey,
+        apiSecret: this.apiSecret,
+        accessToken: this.accessToken,
+        accessTokenSecret: this.accessTokenSecret,
+      });
+
+      this.logger.info("X webhook subscription confirmed", {
+        webhookId: this.webhookId,
+        alreadySubscribed: result.alreadySubscribed,
+      });
+
+      // Cache success for 24 hours
+      await this.chat
+        .getState()
+        .set(cacheKey, true, XAdapter.SUBSCRIPTION_CACHE_TTL_MS);
+    } catch (error) {
+      // Log and continue -- CRC handling and incoming webhooks still work
+      this.logger.warn("Could not subscribe to X webhook", {
+        webhookId: this.webhookId,
+        error,
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -135,7 +218,7 @@ export class XAdapter implements Adapter<XThreadId, unknown> {
         this.logger.info("X CRC challenge: computing HMAC-SHA256 response", {
           crcToken,
           apiSecretLength: this.apiSecret.length,
-          apiSecretPrefix: this.apiSecret.slice(0, 4) + "...",
+          apiSecretPrefix: `${this.apiSecret.slice(0, 4)}...`,
         });
 
         const response = handleCrcChallenge(crcToken, this.apiSecret);
