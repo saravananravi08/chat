@@ -93,6 +93,11 @@ bot.onNewMention(async (thread, message) => {
       </Fields>
       <Divider />
       <Actions>
+        <Select id="quick_action" label="Quick Action" placeholder="Choose...">
+          <SelectOption label="Say Hello" value="greet" />
+          <SelectOption label="Show Info" value="info" />
+          <SelectOption label="Get Help" value="help" />
+        </Select>
         <Button id="hello" style="primary">
           Say Hello
         </Button>
@@ -154,6 +159,21 @@ bot.onModalSubmit("ephemeral_modal_form", async (event) => {
       <Text>The original ephemeral message was updated.</Text>
     </Card>,
   );
+});
+
+bot.onAction("quick_action", async (event) => {
+  const action = event.value;
+  if (action === "greet") {
+    await event.thread.post(`${emoji.wave} Hello, ${event.user.fullName}!`);
+  } else if (action === "info") {
+    await event.thread.post(
+      `${emoji.memo} You're on **${event.adapter.name}** in thread \`${event.threadId}\``,
+    );
+  } else if (action === "help") {
+    await event.thread.post(
+      `${emoji.question} Try mentioning me with "AI" to enable AI assistant mode!`,
+    );
+  }
 });
 
 // Handle card button actions

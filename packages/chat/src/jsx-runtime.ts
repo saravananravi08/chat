@@ -56,6 +56,7 @@ import {
   type ModalChild,
   type ModalElement,
   Select,
+  type SelectElement,
   SelectOption,
   type SelectOptionElement,
   TextInput,
@@ -219,7 +220,9 @@ type CardChildOrNested =
   | CardChild
   | ButtonElement
   | LinkButtonElement
-  | FieldElement;
+  | FieldElement
+  | SelectElement
+  | SelectOptionElement;
 
 /**
  * Process children, converting JSX elements to card elements.
@@ -382,8 +385,14 @@ function resolveJSXElement(element: JSXElement): AnyCardElement {
   }
 
   if (type === Actions) {
-    // Actions takes array of ButtonElements and LinkButtonElements
-    return Actions(processedChildren as (ButtonElement | LinkButtonElement)[]);
+    // Actions takes array of ButtonElements, LinkButtonElements, and SelectElements
+    return Actions(
+      processedChildren as (
+        | ButtonElement
+        | LinkButtonElement
+        | SelectElement
+      )[],
+    );
   }
 
   if (type === Fields) {

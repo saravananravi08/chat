@@ -139,12 +139,14 @@ function convertTextElement(element: TextElement): string {
  * Convert an actions element to a Discord action row.
  */
 function convertActionsElement(element: ActionsElement): DiscordActionRow {
-  const buttons: DiscordButton[] = element.children.map((button) => {
-    if (button.type === "link-button") {
-      return convertLinkButtonElement(button);
-    }
-    return convertButtonElement(button);
-  });
+  const buttons: DiscordButton[] = element.children
+    .filter((child) => child.type === "button" || child.type === "link-button")
+    .map((button) => {
+      if (button.type === "link-button") {
+        return convertLinkButtonElement(button);
+      }
+      return convertButtonElement(button);
+    });
 
   return {
     type: 1, // Action Row

@@ -171,6 +171,7 @@ interface SlackBlockActionsPayload {
     block_id?: string;
     value?: string;
     action_ts?: string;
+    selected_option?: { value: string };
   }>;
   response_url?: string;
 }
@@ -745,11 +746,12 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
 
     // Process each action (usually just one, but can be multiple)
     for (const action of payload.actions) {
+      const actionValue = action.selected_option?.value ?? action.value;
       const actionEvent: Omit<ActionEvent, "thread" | "openModal"> & {
         adapter: SlackAdapter;
       } = {
         actionId: action.action_id,
-        value: action.value,
+        value: actionValue,
         user: {
           userId: payload.user.id,
           userName: payload.user.username || payload.user.name || "unknown",

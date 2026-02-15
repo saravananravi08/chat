@@ -20,6 +20,7 @@ import type {
   ImageElement,
   LinkButtonElement,
   SectionElement,
+  SelectElement,
   TextElement,
 } from "chat";
 
@@ -55,6 +56,20 @@ interface SlackLinkButtonElement {
   action_id: string;
   url: string;
   style?: "primary" | "danger";
+}
+
+interface SlackSelectElement {
+  type: "static_select";
+  action_id: string;
+  placeholder?: SlackTextObject;
+  options: Array<{
+    text: SlackTextObject;
+    value: string;
+  }>;
+  initial_option?: {
+    text: SlackTextObject;
+    value: string;
+  };
 }
 
 /**
@@ -164,14 +179,21 @@ function convertDividerToBlock(_element: DividerElement): SlackBlock {
   return { type: "divider" };
 }
 
+type SlackActionElement =
+  | SlackButtonElement
+  | SlackLinkButtonElement
+  | SlackSelectElement;
+
 function convertActionsToBlock(element: ActionsElement): SlackBlock {
-  const elements: (SlackButtonElement | SlackLinkButtonElement)[] =
-    element.children.map((button) => {
-      if (button.type === "link-button") {
-        return convertLinkButtonToElement(button);
-      }
-      return convertButtonToElement(button);
-    });
+  const elements: SlackActionElement[] = element.children.map((child) => {
+    if (child.type === "link-button") {
+      return convertLinkButtonToElement(child);
+    }
+    if (child.type === "select") {
+      return convertSelectToElement(child);
+    }
+    return convertButtonToElement(child);
+  });
 
   return {
     type: "actions",
@@ -221,6 +243,31 @@ function convertLinkButtonToElement(
     element.style = style as "primary" | "danger";
   }
 
+  return element;
+}
+
+function convertSelectToElement(select: SelectElement): SlackSelectElement {
+  const options = select.options.map((opt) => ({
+    text: { type: "plain_text" as const, text: convertEmoji(opt.label) },
+    value: opt.value,
+  }));
+  const element: SlackSelectElement = {
+    type: "static_select",
+    action_id: select.id,
+    options,
+  };
+  if (select.placeholder) {
+    element.placeholder = {
+      type: "plain_text",
+      text: convertEmoji(select.placeholder),
+    };
+  }
+  if (select.initialOption) {
+    const initialOpt = options.find((o) => o.value === select.initialOption);
+    if (initialOpt) {
+      element.initial_option = initialOpt;
+    }
+  }
   return element;
 }
 

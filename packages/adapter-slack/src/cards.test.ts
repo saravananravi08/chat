@@ -9,6 +9,8 @@ import {
   Image,
   LinkButton,
   Section,
+  Select,
+  SelectOption,
 } from "chat";
 import { describe, expect, it } from "vitest";
 import { cardToBlockKit, cardToFallbackText } from "./cards";
@@ -295,5 +297,114 @@ describe("cardToFallbackText", () => {
     const card = Card({ title: "Simple Card" });
     const text = cardToFallbackText(card);
     expect(text).toBe("*Simple Card*");
+  });
+});
+
+describe("cardToBlockKit with select elements", () => {
+  it("converts actions with select element", () => {
+    const card = Card({
+      children: [
+        Actions([
+          Select({
+            id: "priority",
+            label: "Priority",
+            placeholder: "Select priority",
+            options: [
+              SelectOption({ label: "High", value: "high" }),
+              SelectOption({ label: "Medium", value: "medium" }),
+              SelectOption({ label: "Low", value: "low" }),
+            ],
+            initialOption: "medium",
+          }),
+        ]),
+      ],
+    });
+    const blocks = cardToBlockKit(card);
+
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("actions");
+
+    const elements = blocks[0].elements as Array<{
+      type: string;
+      action_id: string;
+      placeholder?: { type: string; text: string };
+      options: Array<{ text: { type: string; text: string }; value: string }>;
+      initial_option?: { text: { type: string; text: string }; value: string };
+    }>;
+    expect(elements).toHaveLength(1);
+
+    expect(elements[0].type).toBe("static_select");
+    expect(elements[0].action_id).toBe("priority");
+    expect(elements[0].placeholder).toEqual({
+      type: "plain_text",
+      text: "Select priority",
+    });
+    expect(elements[0].options).toHaveLength(3);
+    expect(elements[0].options[0]).toEqual({
+      text: { type: "plain_text", text: "High" },
+      value: "high",
+    });
+    expect(elements[0].initial_option).toEqual({
+      text: { type: "plain_text", text: "Medium" },
+      value: "medium",
+    });
+  });
+
+  it("converts actions with mixed buttons and selects", () => {
+    const card = Card({
+      children: [
+        Actions([
+          Select({
+            id: "status",
+            label: "Status",
+            options: [
+              SelectOption({ label: "Open", value: "open" }),
+              SelectOption({ label: "Closed", value: "closed" }),
+            ],
+          }),
+          Button({ id: "submit", label: "Submit", style: "primary" }),
+        ]),
+      ],
+    });
+    const blocks = cardToBlockKit(card);
+
+    expect(blocks).toHaveLength(1);
+    const elements = blocks[0].elements as Array<{
+      type: string;
+      action_id: string;
+    }>;
+    expect(elements).toHaveLength(2);
+    expect(elements[0].type).toBe("static_select");
+    expect(elements[0].action_id).toBe("status");
+    expect(elements[1].type).toBe("button");
+    expect(elements[1].action_id).toBe("submit");
+  });
+
+  it("converts select without placeholder or initial option", () => {
+    const card = Card({
+      children: [
+        Actions([
+          Select({
+            id: "category",
+            label: "Category",
+            options: [
+              SelectOption({ label: "Bug", value: "bug" }),
+              SelectOption({ label: "Feature", value: "feature" }),
+            ],
+          }),
+        ]),
+      ],
+    });
+    const blocks = cardToBlockKit(card);
+
+    const elements = blocks[0].elements as Array<{
+      type: string;
+      action_id: string;
+      placeholder?: unknown;
+      initial_option?: unknown;
+    }>;
+    expect(elements[0].type).toBe("static_select");
+    expect(elements[0].placeholder).toBeUndefined();
+    expect(elements[0].initial_option).toBeUndefined();
   });
 });
