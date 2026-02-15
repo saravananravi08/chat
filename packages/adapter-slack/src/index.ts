@@ -1488,7 +1488,11 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
     if (ephemeral) {
       await this.deleteViaResponseUrl(ephemeral.responseUrl);
       if (ephemeral.userId) {
-        const result = await this.postEphemeral(threadId, ephemeral.userId, message);
+        const result = await this.postEphemeral(
+          threadId,
+          ephemeral.userId,
+          message,
+        );
         return {
           id: result.id,
           threadId,
@@ -2128,7 +2132,11 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
       try {
         const data = JSON.parse(decoded);
         if (data.responseUrl && data.userId) {
-          return { messageTs, responseUrl: data.responseUrl, userId: data.userId };
+          return {
+            messageTs,
+            responseUrl: data.responseUrl,
+            userId: data.userId,
+          };
         }
       } catch {
         return { messageTs, responseUrl: decoded, userId: "" };

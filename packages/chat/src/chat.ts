@@ -767,7 +767,9 @@ export class Chat<
     const [isSubscribed, fetchedMessage] = await Promise.all([
       this._stateAdapter.isSubscribed(event.threadId),
       event.messageId && event.adapter.fetchMessage && !isEphemeralMessage
-        ? event.adapter.fetchMessage(event.threadId, event.messageId).catch(() => null)
+        ? event.adapter
+            .fetchMessage(event.threadId, event.messageId)
+            .catch(() => null)
         : Promise.resolve(null),
     ]);
 
