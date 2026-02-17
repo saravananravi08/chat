@@ -1000,12 +1000,23 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
 
     // Let Chat class handle async processing, waitUntil, and isMe filtering
     // Use factory function since parseSlackMessage is async (user lookup)
-    this.chat.processMessage(
-      this,
-      threadId,
-      () => this.parseSlackMessage(event, threadId),
-      options,
-    );
+    //
+    // In multi-workspace mode, the request context (token + botUserId) is set via
+    // AsyncLocalStorage during synchronous webhook handling. processMessage creates
+    // an async task (via waitUntil) that may run after requestContext.run() returns.
+    // Node.js AsyncLocalStorage propagates context to async continuations as long as
+    // the Promise is created within the run() callback. We call processMessage inside
+    // run() so the async task and all its awaits inherit the context.
+    const isMention = event.type === "app_mention";
+    const factory = async (): Promise<Message<unknown>> => {
+      const msg = await this.parseSlackMessage(event, threadId);
+      if (isMention) {
+        msg.isMention = true;
+      }
+      return msg;
+    };
+
+    this.chat.processMessage(this, threadId, factory, options);
   }
 
   /**

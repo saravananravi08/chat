@@ -12,14 +12,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import discordFixtures from "../fixtures/replay/channel/discord.json";
 import gchatFixtures from "../fixtures/replay/channel/gchat.json";
 import slackFixtures from "../fixtures/replay/channel/slack.json";
+import teamsFixtures from "../fixtures/replay/channel/teams.json";
 import {
   createDiscordTestContext,
   createGchatTestContext,
   createSlackTestContext,
+  createTeamsTestContext,
   type DiscordTestContext,
   expectValidAction,
   type GchatTestContext,
   type SlackTestContext,
+  type TeamsTestContext,
 } from "./replay-test-utils";
 
 describe("Replay Tests - Channel", () => {
@@ -442,6 +445,95 @@ describe("Replay Tests - Channel", () => {
           content: "Hello from channel!",
         }),
       );
+    });
+  });
+
+  describe("Teams", () => {
+    let ctx: TeamsTestContext;
+    let capturedAction: ActionEvent | null = null;
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      capturedAction = null;
+
+      ctx = createTeamsTestContext(
+        {
+          botName: teamsFixtures.botName,
+          appId: teamsFixtures.appId,
+        },
+        {
+          onMention: async (thread) => {
+            await thread.subscribe();
+          },
+          onAction: async (event) => {
+            capturedAction = event;
+          },
+        },
+      );
+    });
+
+    afterEach(async () => {
+      await ctx.chat.shutdown();
+    });
+
+    it("should handle channel-post action from production recording", async () => {
+      // First subscribe via mention
+      await ctx.sendWebhook(teamsFixtures.mention);
+
+      // Send channel-post action (Action.Submit with value.actionId)
+      await ctx.sendWebhook(teamsFixtures.channel_post_action);
+
+      expectValidAction(capturedAction, {
+        actionId: "channel-post",
+        userId: teamsFixtures.userId,
+        userName: teamsFixtures.userName,
+        adapterName: "teams",
+      });
+    });
+
+    it("should derive correct channel ID (strip messageid)", async () => {
+      await ctx.sendWebhook(teamsFixtures.mention);
+      await ctx.sendWebhook(teamsFixtures.channel_post_action);
+
+      const channel = capturedAction?.thread.channel;
+      expect(channel).toBeDefined();
+
+      // Channel ID should use the base conversation ID without ;messageid=
+      // Encoded as teams:{b64(baseConversationId)}:{b64(serviceUrl)}
+      const channelId = channel?.id;
+      expect(channelId).toBeDefined();
+      expect(channelId).toContain("teams:");
+
+      // Decode and verify it doesn't contain messageid
+      const parts = channelId?.split(":");
+      if (parts?.[1]) {
+        const decodedConvId = Buffer.from(parts[1], "base64url").toString(
+          "utf-8",
+        );
+        expect(decodedConvId).toBe(teamsFixtures.baseConversationId);
+        expect(decodedConvId).not.toContain("messageid");
+      }
+    });
+
+    it("should post to channel top-level via channel.post", async () => {
+      await ctx.sendWebhook(teamsFixtures.mention);
+      await ctx.sendWebhook(teamsFixtures.channel_post_action);
+
+      const channel = capturedAction?.thread.channel as Channel;
+      await channel.post("Hello from channel!");
+
+      // Verify sendActivity was called via the mock bot adapter
+      expect(ctx.mockBotAdapter.sentActivities.length).toBeGreaterThan(0);
+    });
+
+    it("should cache channel instance on thread", async () => {
+      await ctx.sendWebhook(teamsFixtures.mention);
+      await ctx.sendWebhook(teamsFixtures.channel_post_action);
+
+      const thread = capturedAction?.thread;
+      const channel1 = thread?.channel;
+      const channel2 = thread?.channel;
+      expect(channel1).toBe(channel2);
     });
   });
 });
