@@ -986,6 +986,17 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
       return new Response("Invalid payload JSON", { status: 400 });
     }
 
+    return this.dispatchInteractivePayload(payload, options);
+  }
+
+  /**
+   * Dispatch a pre-parsed interactive payload to the correct handler.
+   * Used by both webhook and socket mode paths.
+   */
+  private dispatchInteractivePayload(
+    payload: SlackInteractivePayload,
+    options?: WebhookOptions
+  ): Response | Promise<Response> {
     switch (payload.type) {
       case "block_actions":
         this.handleBlockActions(payload, options);
@@ -1262,6 +1273,90 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
       return converted;
     }
     return modal;
+  }
+
+  // ===========================================================================
+  // Socket Mode
+  // ===========================================================================
+
+  /**
+   * Start Socket Mode connection.
+   * Creates a SocketModeClient, registers event handlers, and connects.
+   */
+  private async startSocketMode(): Promise<void> {
+    if (!this.appToken) {
+      throw new ValidationError(
+        "slack",
+        "appToken is required for socket mode. Set SLACK_APP_TOKEN or provide it in config."
+      );
+    }
+
+    this.socketClient = new SocketModeClient({ appToken: this.appToken });
+
+    this.socketClient.on("slack_event", async ({ ack, body, retry_num }) => {
+      // Immediately ack to prevent retries
+      await ack();
+
+      // Skip retries
+      if (retry_num && retry_num > 0) {
+        this.logger.debug("Skipping socket mode retry", { retry_num });
+        return;
+      }
+
+      this.routeSocketEvent(body);
+    });
+
+    await this.socketClient.start();
+    this.logger.info("Slack socket mode connected");
+  }
+
+  /**
+   * Route a socket mode event to the appropriate handler.
+   */
+  private routeSocketEvent(
+    body: Record<string, unknown>
+  ): void {
+    const type = body.type as string;
+
+    switch (type) {
+      case "event_callback":
+        this.processEventPayload(body as unknown as SlackWebhookPayload);
+        break;
+
+      case "slash_commands": {
+        const params = new URLSearchParams();
+        for (const [key, value] of Object.entries(body)) {
+          if (typeof value === "string") {
+            params.set(key, value);
+          }
+        }
+        this.handleSlashCommand(params);
+        break;
+      }
+
+      case "interactive": {
+        const payload = body.payload as SlackInteractivePayload | undefined;
+        if (payload) {
+          this.dispatchInteractivePayload(payload);
+        }
+        break;
+      }
+
+      default:
+        this.logger.debug("Unhandled socket mode event type", { type });
+    }
+  }
+
+  /**
+   * Disconnect the socket mode client.
+   * No-op if not connected.
+   */
+  async disconnect(): Promise<void> {
+    if (this.socketClient) {
+      await this.socketClient.disconnect();
+      this.socketClient = null;
+      this.logger.info("Slack socket mode disconnected");
+    }
   }
 
   private verifySignature(
