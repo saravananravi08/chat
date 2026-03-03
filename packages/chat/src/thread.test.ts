@@ -94,6 +94,72 @@ describe("ThreadImpl", () => {
     });
   });
 
+  describe("post with different message formats", () => {
+    let thread: ThreadImpl;
+    let mockAdapter: Adapter;
+    let mockState: ReturnType<typeof createMockState>;
+
+    beforeEach(() => {
+      mockAdapter = createMockAdapter();
+      mockState = createMockState();
+
+      thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+    });
+
+    it("should post a string message", async () => {
+      const result = await thread.post("Hello world");
+
+      expect(mockAdapter.postMessage).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        "Hello world"
+      );
+      expect(result.text).toBe("Hello world");
+      expect(result.id).toBe("msg-1");
+    });
+
+    it("should post a raw message", async () => {
+      const result = await thread.post({ raw: "raw text" });
+
+      expect(mockAdapter.postMessage).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        { raw: "raw text" }
+      );
+      expect(result.text).toBe("raw text");
+    });
+
+    it("should post a markdown message", async () => {
+      const result = await thread.post({ markdown: "**bold** text" });
+
+      expect(result.text).toBe("bold text");
+    });
+
+    it("should set correct author on sent message", async () => {
+      const result = await thread.post("Hello");
+
+      expect(result.author.isBot).toBe(true);
+      expect(result.author.isMe).toBe(true);
+      expect(result.author.userId).toBe("self");
+      expect(result.author.userName).toBe("slack-bot");
+    });
+
+    it("should use threadId override from postMessage response", async () => {
+      (mockAdapter.postMessage as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "msg-2",
+        threadId: "slack:C123:new-thread-id",
+        raw: {},
+      });
+
+      const result = await thread.post("Hello");
+
+      expect(result.threadId).toBe("slack:C123:new-thread-id");
+    });
+  });
+
   describe("Streaming", () => {
     let thread: ThreadImpl;
     let mockAdapter: Adapter;
@@ -1041,5 +1107,591 @@ describe("ThreadImpl", () => {
 
     // Note: Streaming is prevented at the type level - postEphemeral accepts
     // AdapterPostableMessage | CardJSXElement which excludes AsyncIterable<string>
+  });
+
+  describe("subscribe and unsubscribe", () => {
+    let thread: ThreadImpl;
+    let mockAdapter: Adapter;
+    let mockState: ReturnType<typeof createMockState>;
+
+    beforeEach(() => {
+      mockAdapter = createMockAdapter();
+      mockState = createMockState();
+
+      thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+    });
+
+    it("should subscribe via state adapter", async () => {
+      await thread.subscribe();
+
+      expect(mockState.subscribe).toHaveBeenCalledWith("slack:C123:1234.5678");
+    });
+
+    it("should call adapter.onThreadSubscribe when available", async () => {
+      const mockOnSubscribe = vi.fn().mockResolvedValue(undefined);
+      mockAdapter.onThreadSubscribe = mockOnSubscribe;
+
+      await thread.subscribe();
+
+      expect(mockOnSubscribe).toHaveBeenCalledWith("slack:C123:1234.5678");
+    });
+
+    it("should not error when adapter has no onThreadSubscribe", async () => {
+      mockAdapter.onThreadSubscribe = undefined;
+
+      await expect(thread.subscribe()).resolves.toBeUndefined();
+      expect(mockState.subscribe).toHaveBeenCalledWith("slack:C123:1234.5678");
+    });
+
+    it("should unsubscribe via state adapter", async () => {
+      await thread.subscribe();
+      await thread.unsubscribe();
+
+      expect(mockState.unsubscribe).toHaveBeenCalledWith(
+        "slack:C123:1234.5678"
+      );
+    });
+  });
+
+  describe("isSubscribed", () => {
+    let thread: ThreadImpl;
+    let mockAdapter: Adapter;
+    let mockState: ReturnType<typeof createMockState>;
+
+    beforeEach(() => {
+      mockAdapter = createMockAdapter();
+      mockState = createMockState();
+    });
+
+    it("should return false when not subscribed", async () => {
+      thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      const result = await thread.isSubscribed();
+      expect(result).toBe(false);
+    });
+
+    it("should return true after subscribing", async () => {
+      thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      await thread.subscribe();
+      const result = await thread.isSubscribed();
+      expect(result).toBe(true);
+    });
+
+    it("should return false after unsubscribing", async () => {
+      thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      await thread.subscribe();
+      await thread.unsubscribe();
+      const result = await thread.isSubscribed();
+      expect(result).toBe(false);
+    });
+
+    it("should short-circuit and return true when isSubscribedContext is set", async () => {
+      thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        isSubscribedContext: true,
+      });
+
+      const result = await thread.isSubscribed();
+      expect(result).toBe(true);
+      // Should NOT have called the state adapter
+      expect(mockState.isSubscribed).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("recentMessages getter/setter", () => {
+    it("should start with empty array by default", () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      expect(thread.recentMessages).toEqual([]);
+    });
+
+    it("should initialize with initialMessage when provided", () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+      const msg = createTestMessage("msg-1", "Initial");
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        initialMessage: msg,
+      });
+
+      expect(thread.recentMessages).toHaveLength(1);
+      expect(thread.recentMessages[0].text).toBe("Initial");
+    });
+
+    it("should allow setting recentMessages", () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      const messages = [
+        createTestMessage("msg-1", "First"),
+        createTestMessage("msg-2", "Second"),
+      ];
+
+      thread.recentMessages = messages;
+
+      expect(thread.recentMessages).toHaveLength(2);
+      expect(thread.recentMessages[0].text).toBe("First");
+      expect(thread.recentMessages[1].text).toBe("Second");
+    });
+
+    it("should allow replacing recentMessages", () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+      const msg = createTestMessage("msg-1", "Initial");
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        initialMessage: msg,
+      });
+
+      const newMessages = [createTestMessage("msg-2", "Replaced")];
+      thread.recentMessages = newMessages;
+
+      expect(thread.recentMessages).toHaveLength(1);
+      expect(thread.recentMessages[0].text).toBe("Replaced");
+    });
+  });
+
+  describe("startTyping", () => {
+    it("should call adapter.startTyping with thread id", async () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      await thread.startTyping();
+
+      expect(mockAdapter.startTyping).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        undefined
+      );
+    });
+
+    it("should pass status to adapter.startTyping", async () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      await thread.startTyping("thinking...");
+
+      expect(mockAdapter.startTyping).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        "thinking..."
+      );
+    });
+  });
+
+  describe("mentionUser", () => {
+    it("should return formatted mention string", () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      expect(thread.mentionUser("U456")).toBe("<@U456>");
+    });
+
+    it("should handle various user ID formats", () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      expect(thread.mentionUser("UABC123")).toBe("<@UABC123>");
+      expect(thread.mentionUser("bot-user-id")).toBe("<@bot-user-id>");
+    });
+  });
+
+  describe("createSentMessageFromMessage", () => {
+    let thread: ThreadImpl;
+    let mockAdapter: Adapter;
+    let mockState: ReturnType<typeof createMockState>;
+
+    beforeEach(() => {
+      mockAdapter = createMockAdapter();
+      mockState = createMockState();
+
+      thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+    });
+
+    it("should wrap a Message as a SentMessage with same fields", () => {
+      const msg = createTestMessage("msg-1", "Hello world");
+
+      const sent = thread.createSentMessageFromMessage(msg);
+
+      expect(sent.id).toBe("msg-1");
+      expect(sent.text).toBe("Hello world");
+      expect(sent.threadId).toBe(msg.threadId);
+      expect(sent.author).toBe(msg.author);
+      expect(sent.metadata).toBe(msg.metadata);
+      expect(sent.attachments).toBe(msg.attachments);
+    });
+
+    it("should provide edit capability", async () => {
+      const msg = createTestMessage("msg-1", "Hello world");
+
+      const sent = thread.createSentMessageFromMessage(msg);
+      await sent.edit("Updated content");
+
+      expect(mockAdapter.editMessage).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        "msg-1",
+        "Updated content"
+      );
+    });
+
+    it("should provide delete capability", async () => {
+      const msg = createTestMessage("msg-1", "Hello world");
+
+      const sent = thread.createSentMessageFromMessage(msg);
+      await sent.delete();
+
+      expect(mockAdapter.deleteMessage).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        "msg-1"
+      );
+    });
+
+    it("should provide addReaction capability", async () => {
+      const msg = createTestMessage("msg-1", "Hello world");
+
+      const sent = thread.createSentMessageFromMessage(msg);
+      await sent.addReaction("thumbsup");
+
+      expect(mockAdapter.addReaction).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        "msg-1",
+        "thumbsup"
+      );
+    });
+
+    it("should provide removeReaction capability", async () => {
+      const msg = createTestMessage("msg-1", "Hello world");
+
+      const sent = thread.createSentMessageFromMessage(msg);
+      await sent.removeReaction("thumbsup");
+
+      expect(mockAdapter.removeReaction).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        "msg-1",
+        "thumbsup"
+      );
+    });
+
+    it("should preserve isMention from original message", () => {
+      const msg = createTestMessage("msg-1", "Hello @bot", {
+        isMention: true,
+      });
+
+      const sent = thread.createSentMessageFromMessage(msg);
+      expect(sent.isMention).toBe(true);
+    });
+
+    it("should provide toJSON that delegates to the original message", () => {
+      const msg = createTestMessage("msg-1", "Hello world");
+
+      const sent = thread.createSentMessageFromMessage(msg);
+      const json = sent.toJSON();
+
+      expect(json._type).toBe("chat:Message");
+      expect(json.id).toBe("msg-1");
+      expect(json.text).toBe("Hello world");
+    });
+  });
+
+  describe("Streaming with updateIntervalMs", () => {
+    it("should use custom streamingUpdateIntervalMs from config", async () => {
+      vi.useFakeTimers();
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+      mockAdapter.stream = undefined;
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        streamingUpdateIntervalMs: 1000,
+      });
+
+      let chunkIndex = 0;
+      const chunks = ["A", "B", "C"];
+      const textStream: AsyncIterable<string> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              if (chunkIndex < chunks.length) {
+                const value = chunks[chunkIndex++];
+                return { value, done: false };
+              }
+              return { value: undefined, done: true };
+            },
+          };
+        },
+      };
+
+      const postPromise = thread.post(textStream);
+
+      // Let everything resolve
+      await vi.advanceTimersByTimeAsync(5000);
+      await postPromise;
+
+      // Final text should be accumulated
+      expect(mockAdapter.editMessage).toHaveBeenLastCalledWith(
+        "slack:C123:1234.5678",
+        "msg-1",
+        "ABC"
+      );
+
+      vi.useRealTimers();
+    });
+
+    it("should default streamingUpdateIntervalMs to 500", async () => {
+      vi.useFakeTimers();
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+      mockAdapter.stream = undefined;
+
+      // No streamingUpdateIntervalMs specified - should default to 500
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      let chunkIndex = 0;
+      const chunks = ["X"];
+      const textStream: AsyncIterable<string> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              if (chunkIndex < chunks.length) {
+                const value = chunks[chunkIndex++];
+                return { value, done: false };
+              }
+              return { value: undefined, done: true };
+            },
+          };
+        },
+      };
+
+      const postPromise = thread.post(textStream);
+      await vi.advanceTimersByTimeAsync(2000);
+      await postPromise;
+
+      expect(mockAdapter.editMessage).toHaveBeenLastCalledWith(
+        "slack:C123:1234.5678",
+        "msg-1",
+        "X"
+      );
+
+      vi.useRealTimers();
+    });
+
+    it("should use custom placeholder text for fallback streaming", async () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+      mockAdapter.stream = undefined;
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        fallbackStreamingPlaceholderText: "Loading...",
+      });
+
+      async function* textStream() {
+        yield "Done";
+      }
+
+      await thread.post(textStream());
+
+      // First post should use the custom placeholder
+      expect(mockAdapter.postMessage).toHaveBeenCalledWith(
+        "slack:C123:1234.5678",
+        "Loading..."
+      );
+    });
+  });
+
+  describe("serialization", () => {
+    it("should serialize to JSON", () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        isDM: true,
+      });
+
+      const json = thread.toJSON();
+      expect(json).toEqual({
+        _type: "chat:Thread",
+        id: "slack:C123:1234.5678",
+        channelId: "C123",
+        currentMessage: undefined,
+        isDM: true,
+        adapterName: "slack",
+      });
+    });
+
+    it("should serialize with currentMessage", () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+      const msg = createTestMessage("msg-1", "Current");
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        currentMessage: msg,
+      });
+
+      const json = thread.toJSON();
+      expect(json.currentMessage).toBeDefined();
+      expect(json.currentMessage?._type).toBe("chat:Message");
+      expect(json.currentMessage?.text).toBe("Current");
+    });
+
+    it("should deserialize from JSON with explicit adapter", () => {
+      const mockAdapter = createMockAdapter();
+
+      const json = {
+        _type: "chat:Thread" as const,
+        id: "slack:C123:1234.5678",
+        channelId: "C123",
+        isDM: false,
+        adapterName: "slack",
+      };
+
+      const thread = ThreadImpl.fromJSON(json, mockAdapter);
+
+      expect(thread.id).toBe("slack:C123:1234.5678");
+      expect(thread.channelId).toBe("C123");
+      expect(thread.isDM).toBe(false);
+      expect(thread.adapter).toBe(mockAdapter);
+    });
+
+    it("should deserialize with currentMessage", () => {
+      const mockAdapter = createMockAdapter();
+      const msg = createTestMessage("msg-1", "Serialized");
+      const serializedMsg = msg.toJSON();
+
+      const json = {
+        _type: "chat:Thread" as const,
+        id: "slack:C123:1234.5678",
+        channelId: "C123",
+        currentMessage: serializedMsg,
+        isDM: false,
+        adapterName: "slack",
+      };
+
+      const thread = ThreadImpl.fromJSON(json, mockAdapter);
+
+      // The currentMessage is internal so we test via toJSON roundtrip
+      const roundTripped = thread.toJSON();
+      expect(roundTripped.currentMessage?.text).toBe("Serialized");
+    });
+  });
+
+  describe("SentMessage.toJSON from post", () => {
+    it("should serialize a sent message via toJSON", async () => {
+      const mockAdapter = createMockAdapter();
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+      });
+
+      const result = await thread.post("Hello world");
+      const json = result.toJSON();
+
+      expect(json._type).toBe("chat:Message");
+      expect(json.text).toBe("Hello world");
+      expect(json.author.isBot).toBe(true);
+      expect(json.author.isMe).toBe(true);
+    });
   });
 });
