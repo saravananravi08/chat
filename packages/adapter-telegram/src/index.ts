@@ -772,7 +772,7 @@ export class TelegramAdapter
       rawAccumulated += next.value;
       renderedAccumulated = this.renderStreamMarkdown(rawAccumulated);
 
-      if (!draftStreamingEnabled || !renderedAccumulated.trim()) {
+      if (!(draftStreamingEnabled && renderedAccumulated.trim())) {
         continue;
       }
 
@@ -1480,7 +1480,10 @@ export class TelegramAdapter
       0,
       options?.updateIntervalMs ?? TELEGRAM_DEFAULT_STREAM_UPDATE_INTERVAL_MS
     );
-    const posted = await this.postMessage(threadId, TELEGRAM_STREAM_PLACEHOLDER);
+    const posted = await this.postMessage(
+      threadId,
+      TELEGRAM_STREAM_PLACEHOLDER
+    );
     const threadIdForEdits = posted.threadId || threadId;
 
     let rawAccumulated = "";
@@ -1520,11 +1523,14 @@ export class TelegramAdapter
       try {
         await this.deleteMessage(threadIdForEdits, posted.id);
       } catch (error) {
-        this.logger.debug("Telegram: failed to cleanup empty stream placeholder", {
-          error: String(error),
-          threadId: threadIdForEdits,
-          messageId: posted.id,
-        });
+        this.logger.debug(
+          "Telegram: failed to cleanup empty stream placeholder",
+          {
+            error: String(error),
+            threadId: threadIdForEdits,
+            messageId: posted.id,
+          }
+        );
       }
       throw new ValidationError("telegram", "Message text cannot be empty");
     }
@@ -1540,7 +1546,10 @@ export class TelegramAdapter
   }
 
   private createDraftId(): string {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    if (
+      typeof crypto !== "undefined" &&
+      typeof crypto.randomUUID === "function"
+    ) {
       return crypto.randomUUID();
     }
 
@@ -1599,9 +1608,10 @@ export class TelegramAdapter
     };
   }
 
-  private renderTelegramText(
-    message: AdapterPostableMessage
-  ): { text: string; parseMode?: string } {
+  private renderTelegramText(message: AdapterPostableMessage): {
+    text: string;
+    parseMode?: string;
+  } {
     if (typeof message === "string") {
       return { text: message };
     }
