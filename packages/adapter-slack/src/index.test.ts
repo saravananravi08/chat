@@ -5287,3 +5287,292 @@ describe("socket mode - disconnect", () => {
     await adapter.disconnect();
   });
 });
+
+// ============================================================================
+// Socket Mode Forwarding Tests
+// ============================================================================
+
+describe("socket mode forwarding - handleWebhook", () => {
+  const secret = "test-signing-secret";
+  const appToken = "xapp-forwarding-token";
+
+  it("accepts forwarded event with valid appToken", async () => {
+    const state = createMockState();
+    const chatInstance = createMockChatInstance(state);
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      appToken,
+      logger: mockLogger,
+    });
+    await adapter.initialize(chatInstance);
+
+    const body = JSON.stringify({
+      type: "socket_event",
+      body: {
+        type: "event_callback",
+        event: {
+          type: "message",
+          user: "U123",
+          channel: "C456",
+          text: "forwarded message",
+          ts: "1234567890.123456",
+        },
+      },
+      timestamp: Date.now(),
+    });
+
+    const request = new Request("https://example.com/webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-socket-token": appToken,
+      },
+      body,
+    });
+
+    const response = await adapter.handleWebhook(request);
+    expect(response.status).toBe(200);
+    expect(chatInstance.processMessage).toHaveBeenCalled();
+  });
+
+  it("rejects forwarded event with invalid token", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      appToken,
+      logger: mockLogger,
+    });
+
+    const body = JSON.stringify({
+      type: "socket_event",
+      body: { type: "event_callback" },
+      timestamp: Date.now(),
+    });
+
+    const request = new Request("https://example.com/webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-socket-token": "wrong-token",
+      },
+      body,
+    });
+
+    const response = await adapter.handleWebhook(request);
+    expect(response.status).toBe(401);
+  });
+
+  it("rejects forwarded event when no appToken configured", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+    });
+
+    const body = JSON.stringify({
+      type: "socket_event",
+      body: { type: "event_callback" },
+      timestamp: Date.now(),
+    });
+
+    const request = new Request("https://example.com/webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-socket-token": "any-token",
+      },
+      body,
+    });
+
+    const response = await adapter.handleWebhook(request);
+    expect(response.status).toBe(401);
+  });
+
+  it("bypasses signature verification for forwarded events", async () => {
+    const state = createMockState();
+    const chatInstance = createMockChatInstance(state);
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      appToken,
+      logger: mockLogger,
+    });
+    await adapter.initialize(chatInstance);
+
+    // No x-slack-request-timestamp or x-slack-signature headers
+    const body = JSON.stringify({
+      type: "socket_event",
+      body: {
+        type: "event_callback",
+        event: {
+          type: "message",
+          user: "U123",
+          channel: "C456",
+          text: "no sig needed",
+          ts: "1234567890.123456",
+        },
+      },
+      timestamp: Date.now(),
+    });
+
+    const request = new Request("https://example.com/webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-socket-token": appToken,
+      },
+      body,
+    });
+
+    const response = await adapter.handleWebhook(request);
+    expect(response.status).toBe(200);
+  });
+
+  it("passes options through to handlers for forwarded events", async () => {
+    const state = createMockState();
+    const chatInstance = createMockChatInstance(state);
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      appToken,
+      logger: mockLogger,
+    });
+    await adapter.initialize(chatInstance);
+
+    const waitUntil = vi.fn();
+    const body = JSON.stringify({
+      type: "socket_event",
+      body: {
+        type: "event_callback",
+        event: {
+          type: "message",
+          user: "U123",
+          channel: "C456",
+          text: "with options",
+          ts: "1234567890.123456",
+        },
+      },
+      timestamp: Date.now(),
+    });
+
+    const request = new Request("https://example.com/webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-socket-token": appToken,
+      },
+      body,
+    });
+
+    const response = await adapter.handleWebhook(request, { waitUntil });
+    expect(response.status).toBe(200);
+    // processMessage receives the options
+    expect(chatInstance.processMessage).toHaveBeenCalledWith(
+      adapter,
+      expect.any(String),
+      expect.any(Function),
+      { waitUntil }
+    );
+  });
+});
+
+describe("startSocketModeListener", () => {
+  const secret = "test-signing-secret";
+
+  it("returns 200 with valid config", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      appToken: "xapp-test-token",
+      logger: mockLogger,
+    });
+
+    const waitUntil = vi.fn();
+    const response = await adapter.startSocketModeListener({ waitUntil }, 1000);
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("listening");
+    expect(waitUntil).toHaveBeenCalled();
+  });
+
+  it("returns 500 without appToken", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      logger: mockLogger,
+    });
+
+    const response = await adapter.startSocketModeListener(
+      { waitUntil: vi.fn() },
+      1000
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain("appToken");
+  });
+
+  it("returns 500 without waitUntil", async () => {
+    const adapter = createSlackAdapter({
+      botToken: "xoxb-test-token",
+      signingSecret: secret,
+      appToken: "xapp-test-token",
+      logger: mockLogger,
+    });
+
+    const response = await adapter.startSocketModeListener({}, 1000);
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain("waitUntil");
+  });
+});
+
+describe("routeSocketEvent with options", () => {
+  async function createSocketAdapterWithOptions() {
+    mockSocketStart.mockClear();
+    mockSocketOn.mockClear();
+    mockSocketDisconnect.mockClear();
+
+    const state = createMockState();
+    const chatInstance = createMockChatInstance(state);
+    const adapter = createSlackAdapter({
+      mode: "socket",
+      appToken: "xapp-test-token",
+      botToken: "xoxb-test-token",
+      logger: mockLogger,
+    });
+
+    await adapter.initialize(chatInstance);
+
+    const slackEventHandler = mockSocketOn.mock.calls.find(
+      (call: unknown[]) => call[0] === "slack_event"
+    )?.[1] as (args: {
+      ack: () => Promise<void>;
+      body: Record<string, unknown>;
+      retry_num?: number;
+    }) => Promise<void>;
+
+    return { adapter, chatInstance, slackEventHandler };
+  }
+
+  it("dispatches slash_commands with waitUntil wrapping", async () => {
+    const { chatInstance, slackEventHandler } =
+      await createSocketAdapterWithOptions();
+
+    await slackEventHandler({
+      ack: vi.fn().mockResolvedValue(undefined),
+      body: {
+        type: "slash_commands",
+        command: "/test",
+        text: "arg1",
+        user_id: "U_USER",
+        channel_id: "C123",
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(chatInstance.processSlashCommand).toHaveBeenCalled();
+    });
+  });
+});
