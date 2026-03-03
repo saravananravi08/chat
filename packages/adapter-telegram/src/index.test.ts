@@ -938,10 +938,20 @@ describe("TelegramAdapter", () => {
 
     const draftBody1 = JSON.parse(
       String((mockFetch.mock.calls[1]?.[1] as RequestInit).body)
-    ) as { chat_id: string; draft_id: string; text: string };
+    ) as {
+      chat_id: string;
+      draft_id: string;
+      text: string;
+      parse_mode?: string;
+    };
     const draftBody2 = JSON.parse(
       String((mockFetch.mock.calls[2]?.[1] as RequestInit).body)
-    ) as { chat_id: string; draft_id: string; text: string };
+    ) as {
+      chat_id: string;
+      draft_id: string;
+      text: string;
+      parse_mode?: string;
+    };
     const finalBody = JSON.parse(
       String((mockFetch.mock.calls[3]?.[1] as RequestInit).body)
     ) as { chat_id: string; text: string; parse_mode?: string };
@@ -950,6 +960,8 @@ describe("TelegramAdapter", () => {
     expect(draftBody2.chat_id).toBe("123");
     expect(draftBody1.text).toBe("hello");
     expect(draftBody2.text).toBe("hello world");
+    expect(draftBody1.parse_mode).toBe("HTML");
+    expect(draftBody2.parse_mode).toBe("HTML");
     expect(draftBody1.draft_id).toBe(draftBody2.draft_id);
     expect(finalBody.chat_id).toBe("123");
     expect(finalBody.text).toBe("hello world");
@@ -1176,6 +1188,50 @@ describe("TelegramAdapter", () => {
       '<a href="https://example.com">Docs</a>'
     );
     expect(sendMessageBody.text).toContain("<code>code</code>");
+  });
+
+  it("streams markdown drafts with Telegram HTML parse mode", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        telegramOk({
+          id: 999,
+          is_bot: true,
+          first_name: "Bot",
+          username: "mybot",
+        })
+      )
+      .mockResolvedValueOnce(telegramOk(true))
+      .mockResolvedValueOnce(telegramOk(true))
+      .mockResolvedValueOnce(telegramOk(sampleMessage({ text: "done" })));
+
+    const adapter = createTelegramAdapter({
+      botToken: "token",
+      mode: "webhook",
+      logger: mockLogger,
+      userName: "mybot",
+    });
+
+    await adapter.initialize(createMockChat());
+
+    const stream = (async function* () {
+      yield "**bold";
+      yield "** text";
+    })();
+
+    await adapter.stream("telegram:123", stream, {
+      updateIntervalMs: 0,
+    });
+
+    const draftBody1 = JSON.parse(
+      String((mockFetch.mock.calls[1]?.[1] as RequestInit).body)
+    ) as { text: string; parse_mode?: string };
+    const draftBody2 = JSON.parse(
+      String((mockFetch.mock.calls[2]?.[1] as RequestInit).body)
+    ) as { text: string; parse_mode?: string };
+
+    expect(draftBody1.parse_mode).toBe("HTML");
+    expect(draftBody2.parse_mode).toBe("HTML");
+    expect(draftBody2.text).toContain("<b>bold</b>");
   });
 
   it("cleans up placeholder and throws when fallback stream is empty", async () => {

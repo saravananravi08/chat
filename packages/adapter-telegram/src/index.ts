@@ -770,7 +770,7 @@ export class TelegramAdapter
       }
 
       rawAccumulated += next.value;
-      renderedAccumulated = this.renderStreamText(rawAccumulated);
+      renderedAccumulated = this.renderStreamMarkdown(rawAccumulated);
 
       if (!draftStreamingEnabled || !renderedAccumulated.trim()) {
         continue;
@@ -787,7 +787,11 @@ export class TelegramAdapter
       }
 
       try {
-        await this.sendDraftMessage(parsedThread.chatId, draftId, renderedAccumulated);
+        await this.sendDraftMessage(
+          parsedThread.chatId,
+          draftId,
+          renderedAccumulated
+        );
         lastDraftText = renderedAccumulated;
         lastDraftSentAt = now;
         draftUpdatesSent += 1;
@@ -831,10 +835,14 @@ export class TelegramAdapter
       throw new ValidationError("telegram", "Message text cannot be empty");
     }
 
-    renderedAccumulated = this.renderStreamText(rawAccumulated);
+    renderedAccumulated = this.renderStreamMarkdown(rawAccumulated);
     if (draftStreamingEnabled && renderedAccumulated !== lastDraftText) {
       try {
-        await this.sendDraftMessage(parsedThread.chatId, draftId, renderedAccumulated);
+        await this.sendDraftMessage(
+          parsedThread.chatId,
+          draftId,
+          renderedAccumulated
+        );
       } catch (error) {
         this.logger.warn(
           "Telegram: final sendMessageDraft update failed; sending final message anyway",
@@ -1482,7 +1490,7 @@ export class TelegramAdapter
     for await (const chunk of textStream) {
       rawAccumulated += chunk;
 
-      const rendered = this.renderStreamText(rawAccumulated);
+      const rendered = this.renderStreamMarkdown(rawAccumulated);
       const now = Date.now();
       const shouldEdit =
         rendered.trim() &&
@@ -1521,7 +1529,7 @@ export class TelegramAdapter
       throw new ValidationError("telegram", "Message text cannot be empty");
     }
 
-    const finalRendered = this.renderStreamText(rawAccumulated);
+    const finalRendered = this.renderStreamMarkdown(rawAccumulated);
     if (finalRendered.trim() && finalRendered !== lastRendered) {
       return this.editMessage(threadIdForEdits, posted.id, {
         markdown: rawAccumulated,
@@ -1550,6 +1558,7 @@ export class TelegramAdapter
       chat_id: chatId,
       draft_id: draftId,
       text,
+      parse_mode: TELEGRAM_HTML_PARSE_MODE,
     });
   }
 
@@ -1574,9 +1583,8 @@ export class TelegramAdapter
     return false;
   }
 
-  private renderStreamText(rawText: string): string {
-    // Telegram expects Unicode emoji, and the gchat resolver emits Unicode output.
-    return this.truncateMessage(convertEmojiPlaceholders(rawText, "gchat"));
+  private renderStreamMarkdown(rawText: string): string {
+    return this.truncateMessage(this.formatConverter.fromMarkdown(rawText));
   }
 
   private renderTelegramCardText(card: CardElement): {
