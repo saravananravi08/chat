@@ -10,8 +10,46 @@ export interface TelegramAdapterConfig {
   apiBaseUrl?: string;
   /** Telegram bot token from BotFather. */
   botToken: string;
+  /** Optional long-polling configuration for getUpdates flow. */
+  longPolling?: TelegramLongPollingConfig;
+  /**
+   * Adapter runtime mode:
+   * - auto: choose webhook vs polling based on webhook registration/runtime (default)
+   * - webhook: webhook-only mode
+   * - polling: polling-only mode
+   */
+  mode?: TelegramAdapterMode;
   /** Optional webhook secret token checked against x-telegram-bot-api-secret-token. */
   secretToken?: string;
+}
+
+export type TelegramAdapterMode = "auto" | "webhook" | "polling";
+
+/**
+ * Telegram long-polling configuration.
+ * @see https://core.telegram.org/bots/api#getupdates
+ */
+export interface TelegramLongPollingConfig {
+  /** Allowed update types passed to getUpdates. */
+  allowedUpdates?: string[];
+  /**
+   * Delete webhook before polling starts.
+   * Telegram requires this when switching from webhook mode to getUpdates.
+   * @default true
+   */
+  deleteWebhook?: boolean;
+  /** Passed to deleteWebhook as drop_pending_updates when deleting webhook. */
+  dropPendingUpdates?: boolean;
+  /**
+   * Maximum number of updates per getUpdates call.
+   * Telegram range: 1-100.
+   * @default 100
+   */
+  limit?: number;
+  /** Delay before retrying polling after errors. @default 1000 */
+  retryDelayMs?: number;
+  /** Long-poll timeout in seconds for getUpdates. @default 30 */
+  timeout?: number;
 }
 
 /**
@@ -198,6 +236,21 @@ export interface TelegramApiResponse<TResult> {
     retry_after?: number;
   };
   result?: TResult;
+}
+
+/**
+ * Telegram webhook info response.
+ * @see https://core.telegram.org/bots/api#getwebhookinfo
+ */
+export interface TelegramWebhookInfo {
+  allowed_updates?: string[];
+  has_custom_certificate: boolean;
+  ip_address?: string;
+  last_error_date?: number;
+  last_error_message?: string;
+  max_connections?: number;
+  pending_update_count: number;
+  url: string;
 }
 
 export type TelegramRawMessage = TelegramMessage;

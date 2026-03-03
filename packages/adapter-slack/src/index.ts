@@ -44,6 +44,7 @@ import {
   isJSX,
   Message,
   parseMarkdown,
+  StreamingMarkdownRenderer,
   toModalElement,
   toPlainText,
 } from "chat";
@@ -2309,14 +2310,37 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
     });
 
     let first = true;
+    let lastAppended = "";
+    const renderer = new StreamingMarkdownRenderer();
     for await (const chunk of textStream) {
+      renderer.push(chunk);
+      const committable = renderer.getCommittableText();
+      const delta = committable.slice(lastAppended.length);
+      if (delta.length === 0) {
+        continue;
+      }
+      lastAppended = committable;
       if (first) {
         // Pass token on first append so the streamer uses it for all subsequent calls
         // biome-ignore lint/suspicious/noExplicitAny: ChatStreamer types don't include token
-        await streamer.append({ markdown_text: chunk, token } as any);
+        await streamer.append({ markdown_text: delta, token } as any);
         first = false;
       } else {
-        await streamer.append({ markdown_text: chunk });
+        await streamer.append({ markdown_text: delta });
+      }
+    }
+    // Flush any remaining buffered content (e.g. held table rows at end of stream).
+    // Use getCommittableText (not raw getText) so the delta stays in the same
+    // coordinate space as lastAppended — both include code fence wrapping.
+    renderer.finish();
+    const finalCommittable = renderer.getCommittableText();
+    const finalDelta = finalCommittable.slice(lastAppended.length);
+    if (finalDelta.length > 0) {
+      if (first) {
+        // biome-ignore lint/suspicious/noExplicitAny: ChatStreamer types don't include token
+        await streamer.append({ markdown_text: finalDelta, token } as any);
+      } else {
+        await streamer.append({ markdown_text: finalDelta });
       }
     }
     const result = await streamer.stop(

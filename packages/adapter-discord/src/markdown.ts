@@ -18,7 +18,6 @@ import {
   BaseFormatConverter,
   type Content,
   getNodeChildren,
-  getNodeValue,
   isBlockquoteNode,
   isCodeNode,
   isDeleteNode,
@@ -29,9 +28,11 @@ import {
   isListNode,
   isParagraphNode,
   isStrongNode,
+  isTableNode,
   isTextNode,
   parseMarkdown,
   type Root,
+  tableToAscii,
 } from "chat";
 
 export class DiscordFormatConverter extends BaseFormatConverter {
@@ -182,13 +183,12 @@ export class DiscordFormatConverter extends BaseFormatConverter {
       return "---";
     }
 
-    // For unsupported nodes, try to extract text
-    const children = getNodeChildren(node);
-    if (children.length > 0) {
-      return children
-        .map((child) => this.nodeToDiscordMarkdown(child))
-        .join("");
+    if (isTableNode(node)) {
+      return `\`\`\`\n${tableToAscii(node)}\n\`\`\``;
     }
-    return getNodeValue(node);
+
+    return this.defaultNodeToText(node, (child) =>
+      this.nodeToDiscordMarkdown(child)
+    );
   }
 }

@@ -38,6 +38,22 @@ export interface DiscordThreadId {
 }
 
 /**
+ * Per-request slash command context used while resolving deferred responses.
+ */
+export interface DiscordSlashCommandContext {
+  channelId: string;
+  initialResponseSent: boolean;
+  interactionToken: string;
+}
+
+/**
+ * Async request context for Discord webhook handling.
+ */
+export interface DiscordRequestContext {
+  slashCommand?: DiscordSlashCommandContext;
+}
+
+/**
  * Incoming Discord interaction from webhook.
  */
 export interface DiscordInteraction {
@@ -255,6 +271,8 @@ export interface DiscordGatewayMessageData {
 export interface DiscordGatewayReactionData {
   /** Channel containing the message */
   channel_id: string;
+  /** Channel type (11 = public thread, 12 = private thread) */
+  channel_type?: number;
   /** Emoji used for the reaction */
   emoji: {
     name: string | null;
