@@ -555,9 +555,10 @@ export interface Postable<
   /**
    * Post a message.
    */
+  post(message: Plan): Promise<PlanMessage>;
   post(
-    message: string | PostableMessage | CardJSXElement
-  ): Promise<SentMessage<TRawMessage> | PlanMessage>;
+    message: string | AdapterPostableMessage | AsyncIterable<string> | CardJSXElement
+  ): Promise<SentMessage<TRawMessage>>;
 
   /**
    * Post an ephemeral message visible only to a specific user.
@@ -751,9 +752,10 @@ export interface Thread<TState = Record<string, unknown>, TRawMessage = unknown>
    * await plan.complete({ completeMessage: "Done!" });
    * ```
    */
+  post(message: Plan): Promise<PlanMessage>;
   post(
-    message: string | PostableMessage | CardJSXElement
-  ): Promise<SentMessage<TRawMessage> | PlanMessage>;
+    message: string | AdapterPostableMessage | AsyncIterable<string> | CardJSXElement
+  ): Promise<SentMessage<TRawMessage>>;
 
   /**
    * Post an ephemeral message visible only to a specific user.

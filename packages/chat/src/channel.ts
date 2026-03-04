@@ -241,6 +241,10 @@ export class ChannelImpl<TState = Record<string, unknown>>
     };
   }
 
+  async post(message: Plan): Promise<PlanMessage>;
+  async post(
+    message: string | AdapterPostableMessage | AsyncIterable<string> | CardJSXElement
+  ): Promise<SentMessage>;
   async post(
     message: string | PostableMessage | CardJSXElement
   ): Promise<SentMessage | PlanMessage> {

@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { createSlackAdapter, type SlackAdapter } from "@chat-adapter/slack";
 import { createMemoryState } from "@chat-adapter/state-memory";
-import { Chat, type Logger } from "chat";
+import { Chat, Plan, type Logger } from "chat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createMockSlackClient,
@@ -456,7 +456,8 @@ describe("Slack Integration", () => {
 
     it("should render plan/task blocks and update in-place", async () => {
       chat.onNewMention(async (thread) => {
-        const plan = await thread.postPlan({ initialMessage: "Working..." });
+        const plan = new Plan({ initialMessage: "Working..." });
+        await thread.post(plan);
         await plan.addTask({
           title: "Fetch data",
           children: ["Call API"],
