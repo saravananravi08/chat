@@ -806,7 +806,10 @@ export class TelegramAdapter
 
       renderedAccumulated = this.renderStreamMarkdown(rawAccumulated);
 
-      if (!renderedAccumulated.trim() || renderedAccumulated === lastDraftText) {
+      if (
+        !renderedAccumulated.trim() ||
+        renderedAccumulated === lastDraftText
+      ) {
         continue;
       }
 
