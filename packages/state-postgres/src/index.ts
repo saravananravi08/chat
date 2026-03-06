@@ -282,7 +282,7 @@ export class PostgresStateAdapter implements StateAdapter {
 }
 
 function generateToken(): string {
-  return `pg_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+  return `pg_${crypto.randomUUID()}`;
 }
 
 export function createPostgresState(
