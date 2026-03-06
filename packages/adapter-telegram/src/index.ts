@@ -971,6 +971,9 @@ export class TelegramAdapter
 
   isDM(threadId: string): boolean {
     const { chatId } = this.resolveThreadId(threadId);
+    // Telegram group/supergroup/channel chat IDs are always negative.
+    // Private (DM) chat IDs are positive. This heuristic is reliable
+    // because Telegram never assigns negative IDs to private chats.
     return !chatId.startsWith("-");
   }
 
