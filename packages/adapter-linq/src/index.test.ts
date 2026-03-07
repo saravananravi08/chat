@@ -981,6 +981,317 @@ describe("openDM", () => {
   });
 });
 
+describe("botUserId", () => {
+  it("returns phoneNumber when configured", () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      phoneNumber: "+15551234567",
+      logger: mockLogger,
+    });
+    expect(adapter.botUserId).toBe("+15551234567");
+  });
+
+  it("returns undefined when phoneNumber is not configured", () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      logger: mockLogger,
+    });
+    expect(adapter.botUserId).toBeUndefined();
+  });
+});
+
+describe("postMessage with file attachments", () => {
+  it("uploads files and includes attachment_id in message parts", async () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      logger: mockLogger,
+    });
+    await adapter.initialize(createMockChat());
+
+    // First call: POST /v3/attachments (pre-upload)
+    mockFetch.mockResolvedValueOnce(
+      linqOk({
+        attachment_id: "att-uuid-123",
+        upload_url: "https://uploads.example.com/presigned",
+        download_url: "https://cdn.example.com/photo.jpg",
+        http_method: "PUT",
+        expires_at: "2025-01-15T10:45:00Z",
+        required_headers: { "Content-Type": "image/jpeg" },
+      })
+    );
+
+    // Second call: PUT to upload_url
+    mockFetch.mockResolvedValueOnce(new Response(null, { status: 200 }));
+
+    // Third call: POST /v3/chats/{chatId}/messages
+    mockFetch.mockResolvedValueOnce(
+      linqOk(
+        {
+          chat_id: "chat-123",
+          message: {
+            id: "msg-with-file",
+            parts: [
+              { type: "text", value: "Check this photo" },
+              { type: "media", attachment_id: "att-uuid-123" },
+            ],
+            status: "queued",
+            created_at: "2025-01-01T00:00:00Z",
+          },
+        },
+        202
+      )
+    );
+
+    const result = await adapter.postMessage("linq:chat-123", {
+      markdown: "Check this photo",
+      files: [
+        {
+          data: Buffer.from("fake-image-data"),
+          filename: "photo.jpg",
+          mimeType: "image/jpeg",
+        },
+      ],
+    });
+
+    expect(result.id).toBe("msg-with-file");
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("skips failed uploads and still sends message", async () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      logger: mockLogger,
+    });
+    await adapter.initialize(createMockChat());
+
+    // First call: POST /v3/attachments fails
+    mockFetch.mockResolvedValueOnce(linqError(500));
+
+    // Second call: POST /v3/chats/{chatId}/messages (text only)
+    mockFetch.mockResolvedValueOnce(
+      linqOk(
+        {
+          chat_id: "chat-123",
+          message: {
+            id: "msg-text-only",
+            parts: [{ type: "text", value: "Hello" }],
+            status: "queued",
+            created_at: "2025-01-01T00:00:00Z",
+          },
+        },
+        202
+      )
+    );
+
+    const result = await adapter.postMessage("linq:chat-123", {
+      markdown: "Hello",
+      files: [
+        {
+          data: Buffer.from("bad-data"),
+          filename: "doc.pdf",
+          mimeType: "application/pdf",
+        },
+      ],
+    });
+
+    expect(result.id).toBe("msg-text-only");
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Failed to upload file, skipping attachment",
+      expect.objectContaining({ filename: "doc.pdf" })
+    );
+  });
+});
+
+describe("fetchChannelMessages", () => {
+  it("delegates to fetchMessages with encoded thread ID", async () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      logger: mockLogger,
+    });
+    await adapter.initialize(createMockChat());
+
+    mockFetch.mockResolvedValueOnce(
+      linqOk({
+        messages: [
+          {
+            id: "msg-1",
+            chat_id: "chat-123",
+            is_from_me: false,
+            is_delivered: true,
+            is_read: true,
+            created_at: "2025-01-01T00:00:00Z",
+            updated_at: "2025-01-01T00:00:00Z",
+            parts: [{ type: "text", value: "Hello", reactions: null }],
+            from_handle: {
+              id: "h1",
+              handle: "+15551234567",
+              service: "iMessage",
+              joined_at: "2025-01-01T00:00:00Z",
+            },
+          },
+        ],
+        next_cursor: null,
+      })
+    );
+
+    const result = await adapter.fetchChannelMessages("chat-123", {
+      limit: 10,
+    });
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0].text).toBe("Hello");
+  });
+});
+
+describe("listThreads", () => {
+  it("throws when phoneNumber is not configured", async () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      logger: mockLogger,
+    });
+
+    await expect(adapter.listThreads("any")).rejects.toThrow(ValidationError);
+  });
+
+  it("lists chats as threads", async () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      phoneNumber: "+15551234567",
+      logger: mockLogger,
+    });
+    await adapter.initialize(createMockChat());
+
+    // First call: GET /v3/chats
+    mockFetch.mockResolvedValueOnce(
+      linqOk({
+        chats: [
+          {
+            id: "chat-aaa",
+            display_name: "Chat A",
+            is_group: false,
+            is_archived: false,
+            handles: [],
+            created_at: "2025-01-01T00:00:00Z",
+            updated_at: "2025-01-02T00:00:00Z",
+          },
+        ],
+        next_cursor: "cursor-next",
+      })
+    );
+
+    // Second call: GET /v3/chats/{chatId}/messages (for root message)
+    mockFetch.mockResolvedValueOnce(
+      linqOk({
+        messages: [
+          {
+            id: "msg-root",
+            chat_id: "chat-aaa",
+            is_from_me: false,
+            is_delivered: true,
+            is_read: true,
+            created_at: "2025-01-01T00:00:00Z",
+            updated_at: "2025-01-01T00:00:00Z",
+            parts: [{ type: "text", value: "First msg", reactions: null }],
+            from_handle: {
+              id: "h1",
+              handle: "+15559876543",
+              service: "iMessage",
+              joined_at: "2025-01-01T00:00:00Z",
+            },
+          },
+        ],
+        next_cursor: null,
+      })
+    );
+
+    const result = await adapter.listThreads("any-channel", { limit: 5 });
+    expect(result.threads).toHaveLength(1);
+    expect(result.threads[0].id).toBe("linq:chat-aaa");
+    expect(result.threads[0].rootMessage.text).toBe("First msg");
+    expect(result.nextCursor).toBe("cursor-next");
+  });
+});
+
+describe("message.failed webhook", () => {
+  it("logs error for failed messages", async () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      logger: mockLogger,
+    });
+    const mockChat = createMockChat();
+    await adapter.initialize(mockChat);
+
+    const body = JSON.stringify({
+      api_version: "v3",
+      webhook_version: "2026-02-03",
+      event_type: "message.failed",
+      event_id: "evt-fail-1",
+      created_at: new Date().toISOString(),
+      trace_id: "trace-f",
+      partner_id: "partner-1",
+      data: {
+        chat_id: "chat-123",
+        message_id: "msg-failed",
+        code: 3007,
+        reason: "Request expired before being processed",
+        failed_at: "2025-11-23T17:35:00Z",
+      },
+    });
+
+    const request = new Request("https://example.com/webhook", {
+      method: "POST",
+      body,
+    });
+
+    const response = await adapter.handleWebhook(request);
+    expect(response.status).toBe(200);
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      "Linq message send failed",
+      expect.objectContaining({
+        chatId: "chat-123",
+        messageId: "msg-failed",
+        code: 3007,
+        reason: "Request expired before being processed",
+      })
+    );
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("message.delivered webhook", () => {
+  it("logs delivery status without processing as message", async () => {
+    const adapter = new LinqAdapter({
+      apiToken: "test-token",
+      logger: mockLogger,
+    });
+    const mockChat = createMockChat();
+    await adapter.initialize(mockChat);
+
+    const body = JSON.stringify({
+      api_version: "v3",
+      webhook_version: "2026-02-03",
+      event_type: "message.delivered",
+      event_id: "evt-del-1",
+      created_at: new Date().toISOString(),
+      trace_id: "trace-d",
+      partner_id: "partner-1",
+      data: {
+        chat: { id: "chat-123" },
+        id: "msg-123",
+        direction: "outbound",
+      },
+    });
+
+    const request = new Request("https://example.com/webhook", {
+      method: "POST",
+      body,
+    });
+
+    const response = await adapter.handleWebhook(request);
+    expect(response.status).toBe(200);
+    expect(mockChat.processMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe("postChannelMessage", () => {
   it("delegates to postMessage with encoded thread ID", async () => {
     const adapter = new LinqAdapter({

@@ -51,4 +51,7 @@ export type LinqMessageEventV2 = components["schemas"]["MessageEventV2"];
 
 export type LinqReactionEventBase = components["schemas"]["ReactionEventBase"];
 
+export type LinqMessageFailedEvent =
+  components["schemas"]["MessageFailedEvent"];
+
 export type LinqRawMessage = LinqMessage;

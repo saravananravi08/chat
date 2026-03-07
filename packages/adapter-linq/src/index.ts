@@ -19,6 +19,8 @@ import type {
   FetchOptions,
   FetchResult,
   FormattedContent,
+  ListThreadsOptions,
+  ListThreadsResult,
   Logger,
   RawMessage,
   ThreadInfo,
@@ -27,12 +29,13 @@ import type {
 import { ConsoleLogger, Message } from "chat";
 import createClient from "openapi-fetch";
 import { LinqFormatConverter } from "./markdown";
-import type { paths } from "./schema";
+import type { components, paths } from "./schema";
 import type {
   LinqAdapterConfig,
   LinqChat,
   LinqMessage,
   LinqMessageEventV2,
+  LinqMessageFailedEvent,
   LinqRawMessage,
   LinqReactionEventBase,
   LinqThreadId,
@@ -77,6 +80,10 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
 
   get userName(): string {
     return this._userName;
+  }
+
+  get botUserId(): string | undefined {
+    return this.phoneNumber;
   }
 
   constructor(config: LinqAdapterConfig = {}) {
@@ -210,10 +217,15 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
     const parts: unknown[] = [{ type: "text", value: text }];
 
     for (const file of files) {
-      this.logger.warn(
-        "Linq adapter does not yet support file uploads, skipping attachment",
-        { filename: file.filename }
-      );
+      try {
+        const attachmentId = await this.uploadFile(file);
+        parts.push({ type: "media", attachment_id: attachmentId });
+      } catch (error) {
+        this.logger.warn("Failed to upload file, skipping attachment", {
+          filename: file.filename,
+          error: String(error),
+        });
+      }
     }
 
     const { data, error, response } = await this.client.POST(
@@ -496,6 +508,62 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
     return this.postMessage(threadId, message);
   }
 
+  async fetchChannelMessages(
+    channelId: string,
+    options: FetchOptions = {}
+  ): Promise<FetchResult<LinqRawMessage>> {
+    const threadId = this.encodeThreadId({ chatId: channelId });
+    return this.fetchMessages(threadId, options);
+  }
+
+  async listThreads(
+    _channelId: string,
+    options: ListThreadsOptions = {}
+  ): Promise<ListThreadsResult<LinqRawMessage>> {
+    if (!this.phoneNumber) {
+      throw new ValidationError(
+        "linq",
+        "phoneNumber is required for listThreads. Set LINQ_PHONE_NUMBER or provide it in config."
+      );
+    }
+
+    const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+
+    const { data, error, response } = await this.client.GET("/v3/chats", {
+      params: {
+        query: {
+          from: this.phoneNumber,
+          limit,
+          cursor: options.cursor ?? undefined,
+        },
+      },
+    });
+
+    if (error || !data) {
+      this.handleApiError(response, "listThreads");
+    }
+
+    const threads = await Promise.all(
+      data.chats.map(async (chat) => {
+        const threadId = this.encodeThreadId({ chatId: chat.id });
+        const messagesResult = await this.fetchMessages(threadId, { limit: 1 });
+        const rootMessage =
+          messagesResult.messages[0] ?? this.createEmptyMessage(chat, threadId);
+
+        return {
+          id: threadId,
+          rootMessage,
+          lastReplyAt: chat.updated_at ? new Date(chat.updated_at) : undefined,
+        };
+      })
+    );
+
+    return {
+      threads,
+      nextCursor: data.next_cursor ?? undefined,
+    };
+  }
+
   parseMessage(raw: LinqRawMessage): Message<LinqRawMessage> {
     const threadId = this.encodeThreadId({ chatId: raw.chat_id });
     return this.parseLinqMessage(raw, threadId);
@@ -529,6 +597,25 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
           eventType === "reaction.added",
           options
         );
+        break;
+      }
+      case "message.failed": {
+        const failedData = payload.data as LinqMessageFailedEvent;
+        this.logger.error("Linq message send failed", {
+          chatId: failedData.chat_id,
+          messageId: failedData.message_id,
+          code: failedData.code,
+          reason: failedData.reason,
+          failedAt: failedData.failed_at,
+        });
+        break;
+      }
+      case "message.delivered":
+      case "message.read": {
+        this.logger.debug("Linq delivery status event", {
+          eventType,
+          eventId: payload.event_id,
+        });
         break;
       }
       default:
@@ -752,6 +839,90 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
     });
   }
 
+  private async uploadFile(file: {
+    data: Buffer | Blob | ArrayBuffer;
+    filename: string;
+    mimeType?: string;
+  }): Promise<string> {
+    const mimeType = file.mimeType ?? "application/octet-stream";
+    let fileData: Buffer;
+    if (Buffer.isBuffer(file.data)) {
+      fileData = file.data;
+    } else if (file.data instanceof ArrayBuffer) {
+      fileData = Buffer.from(file.data);
+    } else {
+      fileData = Buffer.from(await (file.data as Blob).arrayBuffer());
+    }
+
+    const { data, error, response } = await this.client.POST(
+      "/v3/attachments",
+      {
+        body: {
+          filename: file.filename,
+          content_type:
+            mimeType as components["schemas"]["SupportedContentType"],
+          size_bytes: fileData.byteLength,
+        },
+      }
+    );
+
+    if (error || !data) {
+      this.handleApiError(response, "uploadFile");
+    }
+
+    const uploadResponse = await fetch(data.upload_url, {
+      method: data.http_method,
+      headers: data.required_headers,
+      body: fileData,
+    });
+
+    if (!uploadResponse.ok) {
+      throw new NetworkError(
+        "linq",
+        `File upload PUT failed with status ${uploadResponse.status}`
+      );
+    }
+
+    return data.attachment_id;
+  }
+
+  private createEmptyMessage(
+    chat: LinqChat,
+    threadId: string
+  ): Message<LinqRawMessage> {
+    const raw: LinqRawMessage = {
+      id: "",
+      chat_id: chat.id,
+      is_from_me: false,
+      is_delivered: false,
+      is_read: false,
+      created_at: chat.created_at ?? new Date().toISOString(),
+      updated_at: chat.updated_at ?? new Date().toISOString(),
+      parts: null,
+    };
+
+    return new Message<LinqRawMessage>({
+      id: "",
+      threadId,
+      text: "",
+      formatted: this.formatConverter.toAst(""),
+      raw,
+      author: {
+        userId: "unknown",
+        userName: "unknown",
+        fullName: "unknown",
+        isBot: false,
+        isMe: false,
+      },
+      metadata: {
+        dateSent: chat.created_at ? new Date(chat.created_at) : new Date(),
+        edited: false,
+      },
+      attachments: [],
+      isMention: false,
+    });
+  }
+
   private async verifySignature(
     signature: string,
     timestamp: string,
@@ -875,6 +1046,7 @@ export type {
   LinqChatHandle,
   LinqMessage,
   LinqMessageEventV2,
+  LinqMessageFailedEvent,
   LinqRawMessage,
   LinqReactionEventBase,
   LinqReactionType,
