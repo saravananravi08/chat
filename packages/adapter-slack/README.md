@@ -213,6 +213,7 @@ SLACK_ENCRYPTION_KEY=...             # Optional, for token encryption
 | Delete message | Yes |
 | File uploads | Yes |
 | Streaming | Native API |
+| Scheduled messages | Yes (native, with cancel) |
 
 ### Rich content
 
