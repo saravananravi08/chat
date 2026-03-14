@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { LinqFormatConverter } from "./markdown";
 
 const converter = new LinqFormatConverter();
+const horizontalRuleRegex = /^---$/m;
 
 describe("LinqFormatConverter", () => {
   describe("fromAst", () => {
@@ -107,7 +108,7 @@ describe("LinqFormatConverter", () => {
       const result = converter.fromAst(ast);
       expect(result).toContain("above");
       expect(result).toContain("below");
-      expect(result).not.toMatch(/^---$/m);
+      expect(result).not.toMatch(horizontalRuleRegex);
     });
 
     it("strips blockquote prefixes", () => {

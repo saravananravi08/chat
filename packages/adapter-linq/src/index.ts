@@ -487,6 +487,7 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
       body: {
         from: this.phoneNumber,
         to: [userId],
+        // Linq API requires a message to create a chat
         message: {
           parts: [{ type: "text", value: " " }],
         },
@@ -698,18 +699,18 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
     );
   }
 
-  private parseLinqMessage(
-    raw: LinqMessage,
-    threadId: string
-  ): Message<LinqRawMessage> {
-    const parts = raw.parts ?? [];
+  private extractParts(parts: unknown[]): {
+    text: string;
+    attachments: Attachment[];
+  } {
     const textParts: string[] = [];
     const attachments: Attachment[] = [];
 
     for (const part of parts) {
-      if (part.type === "text") {
+      const typed = part as { type: string };
+      if (typed.type === "text") {
         textParts.push((part as { type: "text"; value: string }).value);
-      } else if (part.type === "media") {
+      } else if (typed.type === "media") {
         const mediaPart = part as {
           type: "media";
           id: string;
@@ -736,7 +737,15 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
         });
       }
     }
-    const text = textParts.join("\n");
+
+    return { text: textParts.join("\n"), attachments };
+  }
+
+  private parseLinqMessage(
+    raw: LinqMessage,
+    threadId: string
+  ): Message<LinqRawMessage> {
+    const { text, attachments } = this.extractParts(raw.parts ?? []);
 
     const senderHandle = raw.from_handle?.handle ?? raw.from ?? "unknown";
     const isMe = raw.is_from_me ?? false;
@@ -768,41 +777,7 @@ export class LinqAdapter implements Adapter<LinqThreadId, LinqRawMessage> {
     threadId: string,
     isEdited = false
   ): Message<LinqRawMessage> {
-    const parts = eventData.parts ?? [];
-    const textParts: string[] = [];
-    const attachments: Attachment[] = [];
-
-    for (const part of parts) {
-      if (part.type === "text") {
-        textParts.push((part as { type: "text"; value: string }).value);
-      } else if (part.type === "media") {
-        const mediaPart = part as {
-          type: "media";
-          id: string;
-          url: string;
-          filename: string;
-          mime_type: string;
-          size_bytes: number;
-        };
-        attachments.push({
-          type: this.mimeTypeToAttachmentType(mediaPart.mime_type),
-          name: mediaPart.filename,
-          mimeType: mediaPart.mime_type,
-          size: mediaPart.size_bytes,
-          fetchData: async () => {
-            const response = await fetch(mediaPart.url);
-            if (!response.ok) {
-              throw new NetworkError(
-                "linq",
-                `Failed to download attachment ${mediaPart.id}`
-              );
-            }
-            return Buffer.from(await response.arrayBuffer());
-          },
-        });
-      }
-    }
-    const text = textParts.join("\n");
+    const { text, attachments } = this.extractParts(eventData.parts ?? []);
 
     const senderHandle = eventData.sender_handle?.handle ?? "unknown";
     const isMe = eventData.direction === "outbound";
