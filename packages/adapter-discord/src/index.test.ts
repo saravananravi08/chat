@@ -1536,6 +1536,42 @@ describe("postMessage", () => {
 
     spy.mockRestore();
   });
+
+  it("does not include content text when posting a card message", async () => {
+    const mockResponse = new Response(
+      JSON.stringify({
+        id: "msg005",
+        channel_id: "channel456",
+        content: "",
+        timestamp: "2021-01-01T00:00:00.000Z",
+        author: { id: "test-app-id", username: "bot" },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+    const spy = vi
+      .spyOn(adapter as any, "discordFetch")
+      .mockResolvedValue(mockResponse);
+
+    const cardMessage = {
+      card: Card({
+        title: "Test Card",
+        children: [Actions([Button({ id: "btn1", label: "Click me" })])],
+      }),
+    };
+
+    await adapter.postMessage("discord:guild1:channel456", cardMessage);
+
+    const calledPayload = spy.mock.calls[0]?.[2] as {
+      content?: string;
+      embeds?: unknown[];
+      components?: unknown[];
+    };
+    expect(calledPayload.content).toBeUndefined();
+    expect(calledPayload.embeds).toBeDefined();
+    expect(calledPayload.components).toBeDefined();
+
+    spy.mockRestore();
+  });
 });
 
 // ============================================================================
@@ -1639,6 +1675,46 @@ describe("editMessage", () => {
     const calledPayload = spy.mock.calls[0]?.[2] as { content?: string };
     expect(calledPayload.content?.length).toBeLessThanOrEqual(2000);
     expect(calledPayload.content?.endsWith("...")).toBe(true);
+
+    spy.mockRestore();
+  });
+
+  it("does not include content text when editing to a card message", async () => {
+    const mockResponse = new Response(
+      JSON.stringify({
+        id: "msg004",
+        channel_id: "channel456",
+        content: "",
+        timestamp: "2021-01-01T00:00:00.000Z",
+        author: { id: "test-app-id", username: "bot" },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+    const spy = vi
+      .spyOn(adapter as any, "discordFetch")
+      .mockResolvedValue(mockResponse);
+
+    const cardMessage = {
+      card: Card({
+        title: "Test Card",
+        children: [Actions([Button({ id: "btn1", label: "Click me" })])],
+      }),
+    };
+
+    await adapter.editMessage(
+      "discord:guild1:channel456",
+      "msg004",
+      cardMessage
+    );
+
+    const calledPayload = spy.mock.calls[0]?.[2] as {
+      content?: string;
+      embeds?: unknown[];
+      components?: unknown[];
+    };
+    expect(calledPayload.content).toBeUndefined();
+    expect(calledPayload.embeds).toBeDefined();
+    expect(calledPayload.components).toBeDefined();
 
     spy.mockRestore();
   });
