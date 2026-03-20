@@ -38,6 +38,30 @@ describe("RedisStateAdapter", () => {
     expect(typeof adapter.getList).toBe("function");
   });
 
+  it("should have enqueue method", () => {
+    const adapter = createRedisState({
+      url: "redis://localhost:6379",
+      logger: mockLogger,
+    });
+    expect(typeof adapter.enqueue).toBe("function");
+  });
+
+  it("should have dequeue method", () => {
+    const adapter = createRedisState({
+      url: "redis://localhost:6379",
+      logger: mockLogger,
+    });
+    expect(typeof adapter.dequeue).toBe("function");
+  });
+
+  it("should have queueDepth method", () => {
+    const adapter = createRedisState({
+      url: "redis://localhost:6379",
+      logger: mockLogger,
+    });
+    expect(typeof adapter.queueDepth).toBe("function");
+  });
+
   // Note: Integration tests with a real Redis instance would go here
   // but require a running Redis server, so they're skipped by default
 

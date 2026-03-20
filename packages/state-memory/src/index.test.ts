@@ -213,6 +213,179 @@ describe("MemoryStateAdapter", () => {
     });
   });
 
+  describe("enqueue / dequeue / queueDepth", () => {
+    it("should enqueue and dequeue a single entry", async () => {
+      const entry = {
+        message: { id: "m1", text: "hello" },
+        enqueuedAt: Date.now(),
+        expiresAt: Date.now() + 90000,
+      };
+      const depth = await adapter.enqueue("thread1", entry as never, 10);
+      expect(depth).toBe(1);
+
+      const result = await adapter.dequeue("thread1");
+      expect(result).toEqual(entry);
+    });
+
+    it("should return null when dequeuing from empty queue", async () => {
+      const result = await adapter.dequeue("thread1");
+      expect(result).toBeNull();
+    });
+
+    it("should return null when dequeuing from nonexistent thread", async () => {
+      const result = await adapter.dequeue("nonexistent");
+      expect(result).toBeNull();
+    });
+
+    it("should return 0 depth for empty queue", async () => {
+      const depth = await adapter.queueDepth("thread1");
+      expect(depth).toBe(0);
+    });
+
+    it("should dequeue in FIFO order", async () => {
+      const entry1 = {
+        message: { id: "m1" },
+        enqueuedAt: 1000,
+        expiresAt: Date.now() + 90000,
+      };
+      const entry2 = {
+        message: { id: "m2" },
+        enqueuedAt: 2000,
+        expiresAt: Date.now() + 90000,
+      };
+      const entry3 = {
+        message: { id: "m3" },
+        enqueuedAt: 3000,
+        expiresAt: Date.now() + 90000,
+      };
+
+      await adapter.enqueue("thread1", entry1 as never, 10);
+      await adapter.enqueue("thread1", entry2 as never, 10);
+      await adapter.enqueue("thread1", entry3 as never, 10);
+
+      expect(await adapter.queueDepth("thread1")).toBe(3);
+
+      const r1 = await adapter.dequeue("thread1");
+      expect(r1?.message).toEqual({ id: "m1" });
+
+      const r2 = await adapter.dequeue("thread1");
+      expect(r2?.message).toEqual({ id: "m2" });
+
+      const r3 = await adapter.dequeue("thread1");
+      expect(r3?.message).toEqual({ id: "m3" });
+
+      expect(await adapter.dequeue("thread1")).toBeNull();
+      expect(await adapter.queueDepth("thread1")).toBe(0);
+    });
+
+    it("should trim to maxSize keeping newest entries", async () => {
+      for (let i = 1; i <= 5; i++) {
+        await adapter.enqueue(
+          "thread1",
+          {
+            message: { id: `m${i}` },
+            enqueuedAt: i * 1000,
+            expiresAt: Date.now() + 90000,
+          } as never,
+          3
+        );
+      }
+
+      expect(await adapter.queueDepth("thread1")).toBe(3);
+
+      const r1 = await adapter.dequeue("thread1");
+      expect(r1?.message).toEqual({ id: "m3" });
+
+      const r2 = await adapter.dequeue("thread1");
+      expect(r2?.message).toEqual({ id: "m4" });
+
+      const r3 = await adapter.dequeue("thread1");
+      expect(r3?.message).toEqual({ id: "m5" });
+    });
+
+    it("should handle maxSize of 1 (debounce behavior)", async () => {
+      await adapter.enqueue(
+        "thread1",
+        {
+          message: { id: "m1" },
+          enqueuedAt: 1000,
+          expiresAt: Date.now() + 90000,
+        } as never,
+        1
+      );
+      await adapter.enqueue(
+        "thread1",
+        {
+          message: { id: "m2" },
+          enqueuedAt: 2000,
+          expiresAt: Date.now() + 90000,
+        } as never,
+        1
+      );
+      await adapter.enqueue(
+        "thread1",
+        {
+          message: { id: "m3" },
+          enqueuedAt: 3000,
+          expiresAt: Date.now() + 90000,
+        } as never,
+        1
+      );
+
+      expect(await adapter.queueDepth("thread1")).toBe(1);
+      const result = await adapter.dequeue("thread1");
+      expect(result?.message).toEqual({ id: "m3" });
+    });
+
+    it("should keep queues isolated by thread", async () => {
+      await adapter.enqueue(
+        "thread-a",
+        {
+          message: { id: "a1" },
+          enqueuedAt: 1000,
+          expiresAt: Date.now() + 90000,
+        } as never,
+        10
+      );
+      await adapter.enqueue(
+        "thread-b",
+        {
+          message: { id: "b1" },
+          enqueuedAt: 1000,
+          expiresAt: Date.now() + 90000,
+        } as never,
+        10
+      );
+
+      expect(await adapter.queueDepth("thread-a")).toBe(1);
+      expect(await adapter.queueDepth("thread-b")).toBe(1);
+
+      const ra = await adapter.dequeue("thread-a");
+      expect(ra?.message).toEqual({ id: "a1" });
+
+      const rb = await adapter.dequeue("thread-b");
+      expect(rb?.message).toEqual({ id: "b1" });
+    });
+
+    it("should clear queues on disconnect", async () => {
+      await adapter.enqueue(
+        "thread1",
+        {
+          message: { id: "m1" },
+          enqueuedAt: 1000,
+          expiresAt: Date.now() + 90000,
+        } as never,
+        10
+      );
+
+      await adapter.disconnect();
+      await adapter.connect();
+
+      expect(await adapter.queueDepth("thread1")).toBe(0);
+      expect(await adapter.dequeue("thread1")).toBeNull();
+    });
+  });
+
   describe("connection", () => {
     it("should throw when not connected", async () => {
       const newAdapter = createMemoryState();

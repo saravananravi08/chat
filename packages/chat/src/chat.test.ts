@@ -2494,6 +2494,227 @@ describe("Chat", () => {
     });
   });
 
+  describe("concurrency: queue edge cases", () => {
+    it("should drop newest when queue is full with drop-newest policy", async () => {
+      const state = createMockState();
+      const adapter = createMockAdapter("slack");
+
+      const queueChat = new Chat({
+        userName: "testbot",
+        adapters: { slack: adapter },
+        state,
+        logger: mockLogger,
+        concurrency: {
+          strategy: "queue",
+          maxQueueSize: 2,
+          onQueueFull: "drop-newest",
+        },
+      });
+
+      await queueChat.webhooks.slack(
+        new Request("http://test.com", { method: "POST" })
+      );
+
+      queueChat.onNewMention(vi.fn().mockResolvedValue(undefined));
+
+      // Hold the lock
+      await state.acquireLock("slack:C123:1234.5678", 30000);
+
+      // Enqueue 2 messages (fills the queue)
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-dq-1", "Hey @slack-bot one")
+      );
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-dq-2", "Hey @slack-bot two")
+      );
+
+      // Third message should be silently dropped (drop-newest)
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-dq-3", "Hey @slack-bot three")
+      );
+
+      // Queue should still have depth 2
+      expect(await state.queueDepth("slack:C123:1234.5678")).toBe(2);
+    });
+
+    it("should drop oldest when queue is full with drop-oldest policy", async () => {
+      const state = createMockState();
+      const adapter = createMockAdapter("slack");
+
+      const queueChat = new Chat({
+        userName: "testbot",
+        adapters: { slack: adapter },
+        state,
+        logger: mockLogger,
+        concurrency: {
+          strategy: "queue",
+          maxQueueSize: 2,
+          onQueueFull: "drop-oldest",
+        },
+      });
+
+      await queueChat.webhooks.slack(
+        new Request("http://test.com", { method: "POST" })
+      );
+
+      const receivedMessages: string[] = [];
+      queueChat.onNewMention(
+        vi.fn().mockImplementation(async (_thread, message) => {
+          receivedMessages.push(message.text);
+        })
+      );
+
+      // Hold the lock
+      await state.acquireLock("slack:C123:1234.5678", 30000);
+
+      // Enqueue 3 messages with maxSize 2 → first should be evicted
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-do-1", "Hey @slack-bot one")
+      );
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-do-2", "Hey @slack-bot two")
+      );
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-do-3", "Hey @slack-bot three")
+      );
+
+      expect(await state.queueDepth("slack:C123:1234.5678")).toBe(2);
+
+      // Release and trigger drain
+      await state.forceReleaseLock("slack:C123:1234.5678");
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-do-4", "Hey @slack-bot four")
+      );
+
+      // msg-do-4 processed directly, then drain gets [msg-do-2, msg-do-3]
+      // (msg-do-1 was evicted), processes msg-do-3 with skipped [msg-do-2]
+      expect(receivedMessages[0]).toBe("Hey @slack-bot four");
+      expect(receivedMessages[1]).toBe("Hey @slack-bot three");
+    });
+
+    it("should skip expired entries during drain", async () => {
+      const state = createMockState();
+      const adapter = createMockAdapter("slack");
+
+      const queueChat = new Chat({
+        userName: "testbot",
+        adapters: { slack: adapter },
+        state,
+        logger: mockLogger,
+        concurrency: {
+          strategy: "queue",
+          queueEntryTtlMs: 1, // Expire almost immediately
+        },
+      });
+
+      await queueChat.webhooks.slack(
+        new Request("http://test.com", { method: "POST" })
+      );
+
+      const receivedMessages: string[] = [];
+      queueChat.onNewMention(
+        vi.fn().mockImplementation(async (_thread, message) => {
+          receivedMessages.push(message.text);
+        })
+      );
+
+      // Hold the lock
+      await state.acquireLock("slack:C123:1234.5678", 30000);
+
+      // Enqueue a message with 1ms TTL
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-exp-1", "Hey @slack-bot expired")
+      );
+
+      // Wait for TTL to expire
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Release and trigger drain
+      await state.forceReleaseLock("slack:C123:1234.5678");
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-exp-2", "Hey @slack-bot fresh")
+      );
+
+      // Only the fresh message should be processed (expired one skipped)
+      expect(receivedMessages).toEqual(["Hey @slack-bot fresh"]);
+    });
+
+    it("should work with onNewMessage pattern handlers", async () => {
+      const state = createMockState();
+      const adapter = createMockAdapter("slack");
+
+      const queueChat = new Chat({
+        userName: "testbot",
+        adapters: { slack: adapter },
+        state,
+        logger: mockLogger,
+        concurrency: "queue",
+      });
+
+      await queueChat.webhooks.slack(
+        new Request("http://test.com", { method: "POST" })
+      );
+
+      const receivedMessages: string[] = [];
+      queueChat.onNewMessage(
+        HELP_REGEX,
+        vi.fn().mockImplementation(async (_thread, message, context) => {
+          receivedMessages.push(message.text);
+          if (context) {
+            for (const s of context.skipped) {
+              receivedMessages.push(`skipped:${s.text}`);
+            }
+          }
+        })
+      );
+
+      // Hold the lock
+      await state.acquireLock("slack:C123:1234.5678", 30000);
+
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-pat-1", "!help first")
+      );
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-pat-2", "!help second")
+      );
+
+      // Release and trigger drain
+      await state.forceReleaseLock("slack:C123:1234.5678");
+      await queueChat.handleIncomingMessage(
+        adapter,
+        "slack:C123:1234.5678",
+        createTestMessage("msg-pat-3", "!help third")
+      );
+
+      // Direct message processed, then drain with skipped context
+      expect(receivedMessages[0]).toBe("!help third");
+      expect(receivedMessages[1]).toBe("!help second");
+      expect(receivedMessages[2]).toBe("skipped:!help first");
+    });
+  });
+
   describe("concurrency: debounce", () => {
     it("should debounce the first message and process after delay", async () => {
       vi.useFakeTimers();
