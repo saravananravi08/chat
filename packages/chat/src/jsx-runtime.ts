@@ -105,6 +105,7 @@ export interface TextProps {
 
 /** Props for Button component in JSX */
 export interface ButtonProps {
+  callbackUrl?: string;
   children?: string | number | (string | number | undefined)[];
   id: string;
   label?: string;
@@ -150,6 +151,7 @@ export type DividerProps = Record<string, never>;
 /** Props for Modal component in JSX */
 export interface ModalProps {
   callbackId: string;
+  callbackUrl?: string;
   children?: unknown;
   closeLabel?: string;
   notifyOnClose?: boolean;
@@ -589,6 +591,7 @@ function resolveJSXElement(element: JSXElement): AnyCardElement {
       label,
       style: props.style,
       value: props.value,
+      callbackUrl: props.callbackUrl,
     });
   }
 
@@ -656,6 +659,7 @@ function resolveJSXElement(element: JSXElement): AnyCardElement {
     }
     return Modal({
       callbackId: props.callbackId,
+      callbackUrl: props.callbackUrl,
       title: props.title,
       submitLabel: props.submitLabel,
       closeLabel: props.closeLabel,

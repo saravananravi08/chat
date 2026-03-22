@@ -109,6 +109,12 @@ The `id` maps to your `onAction` handler. Optional `value` passes extra data:
 <Button id="report" value="bug">Report Bug</Button>
 ```
 
+Optional `callbackUrl` causes the action data to be POSTed to a URL when clicked. See [Callback URLs](/docs/actions#callback-urls) for details.
+
+```tsx title="lib/bot.tsx"
+<Button callbackUrl={webhook.url} id="approve" style="primary">Approve</Button>
+```
+
 ### CardLink
 
 Inline hyperlink rendered as text. Unlike `LinkButton` (which must be inside `Actions`), `CardLink` can be placed directly in a card alongside other content.

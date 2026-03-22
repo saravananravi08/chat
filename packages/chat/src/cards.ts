@@ -59,6 +59,8 @@ export type TextStyle = "plain" | "bold" | "muted";
 
 /** Button element for interactive actions */
 export interface ButtonElement {
+  /** URL to POST action data to when this button is clicked */
+  callbackUrl?: string;
   /** If true, the button is displayed in an inactive state and doesn't respond to user actions */
   disabled?: boolean;
   /** Unique action ID for callback routing */
@@ -350,6 +352,8 @@ export function Actions(
 
 /** Options for Button */
 export interface ButtonOptions {
+  /** URL to POST action data to when this button is clicked */
+  callbackUrl?: string;
   /** If true, the button is displayed in an inactive state and doesn't respond to user actions */
   disabled?: boolean;
   /** Unique action ID for callback routing */
@@ -379,6 +383,7 @@ export function Button(options: ButtonOptions): ButtonElement {
     style: options.style,
     value: options.value,
     disabled: options.disabled,
+    callbackUrl: options.callbackUrl,
   };
 }
 

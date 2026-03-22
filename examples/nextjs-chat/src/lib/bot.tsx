@@ -24,6 +24,7 @@ import {
   TextInput,
   toAiMessages,
 } from "chat";
+import { createWebhook } from "workflow";
 import { buildAdapters } from "./adapters";
 
 const AI_MENTION_REGEX = /\bAI\b/i;
@@ -118,6 +119,9 @@ bot.onNewMention(async (thread, message) => {
         <Button id="info">Show Info</Button>
         <Button id="choose_plan">Choose Plan</Button>
         <Button id="feedback">Send Feedback</Button>
+        <Button id="deploy" value="v2.4.1">
+          Deploy
+        </Button>
         <Button id="messages">Fetch Messages</Button>
         <Button id="channel-post">Channel Post</Button>
         <Button id="show-table">Show Table</Button>
@@ -346,6 +350,52 @@ bot.onAction("goodbye", async (event) => {
   await event.thread.post(
     `${emoji.wave} Goodbye, ${event.user.fullName}! See you later.`
   );
+});
+
+// callbackUrl + Workflow: no onAction handler needed for approve/reject.
+// Each button gets its own webhook URL, and the workflow awaits the result.
+bot.onAction("deploy", async (event) => {
+  if (!event.thread) {
+    return;
+  }
+  const version = event.value ?? "latest";
+  const { thread } = event;
+
+  const approve = createWebhook();
+  const reject = createWebhook();
+
+  await thread.post(
+    <Card title={`${emoji.rocket} Deploy Request: ${version}`}>
+      <Text>{`**${event.user.fullName}** wants to deploy **${version}** to production.`}</Text>
+      <Divider />
+      <Actions>
+        <Button
+          callbackUrl={approve.url}
+          id="deploy_approve"
+          style="primary"
+          value={version}
+        >
+          Approve
+        </Button>
+        <Button
+          callbackUrl={reject.url}
+          id="deploy_reject"
+          style="danger"
+          value={version}
+        >
+          Reject
+        </Button>
+      </Actions>
+    </Card>
+  );
+
+  const { action } = await Promise.race([
+    approve.then(() => ({ action: "approved" as const })),
+    reject.then(() => ({ action: "rejected" as const })),
+  ]);
+
+  const icon = action === "approved" ? emoji.check : emoji.warning;
+  await thread.post(`${icon} Deploy **${version}** was **${action}**`);
 });
 
 bot.onAction("show-table", async (event) => {
