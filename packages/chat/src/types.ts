@@ -3,6 +3,13 @@
  */
 
 import type { Root } from "mdast";
+import type {
+  AgentLike,
+  AgentResultLike,
+  ApprovalResult,
+  RequestApprovalOptions,
+  RunAgentOptions,
+} from "./approval";
 import type { CardElement } from "./cards";
 import type { SerializedChannel } from "./channel";
 import type { ChatElement } from "./jsx-runtime";
@@ -926,6 +933,48 @@ export interface Thread<TState = Record<string, unknown>, TRawMessage = unknown>
    * Fetches the latest 50 messages and updates `recentMessages`.
    */
   refresh(): Promise<void>;
+
+  /**
+   * Post an approval card and wait for the user to approve or deny.
+   *
+   * Posts a Card with Approve/Deny buttons, persists the pending approval
+   * in the StateAdapter (survives server restarts), and returns a Promise
+   * that resolves when the user clicks a button.
+   *
+   * @example
+   * ```tsx
+   * const { approved, user } = await thread.requestApproval({
+   *   id: "transfer-123",
+   *   title: "🔒 Transfer Money",
+   *   fields: { Amount: "$500", To: "acct_123" },
+   * });
+   * ```
+   */
+  requestApproval(options: RequestApprovalOptions): Promise<ApprovalResult>;
+
+  /**
+   * Run an AI SDK agent with automatic human-in-the-loop approval handling.
+   *
+   * Calls the agent, checks for `needsApproval` tool calls, posts approval
+   * cards via `requestApproval()`, resumes the agent with the user's decisions,
+   * and loops until the agent finishes.
+   *
+   * @example
+   * ```tsx
+   * const result = await thread.runAgent(agent, {
+   *   prompt: history,
+   *   approvalCard: (toolCall) => ({
+   *     title: `🔒 Confirm ${toolCall.toolName}`,
+   *     fields: toolCall.input,
+   *   }),
+   * });
+   * await thread.post(result.fullStream);
+   * ```
+   */
+  runAgent(
+    agent: AgentLike,
+    options: RunAgentOptions
+  ): Promise<AgentResultLike>;
 
   /**
    * Show typing indicator in the thread.

@@ -1,5 +1,17 @@
 import { WORKFLOW_DESERIALIZE, WORKFLOW_SERIALIZE } from "@workflow/serde";
 import type { Root } from "mdast";
+import {
+  type AgentLike,
+  type AgentResultLike,
+  type ApprovalResult,
+  buildApprovalCard,
+  buildResolvedCard,
+  defaultApprovalCard,
+  type RequestApprovalOptions,
+  type RunAgentOptions,
+  type StoredApproval,
+  storePendingApproval,
+} from "./approval";
 import { cardToFallbackText } from "./cards";
 import { ChannelImpl, deriveChannelId } from "./channel";
 import { getChatSingleton } from "./chat-singleton";
@@ -707,6 +719,227 @@ export class ThreadImpl<TState = Record<string, unknown>>
 
   mentionUser(userId: string): string {
     return `<@${userId}>`;
+  }
+
+  // ===========================================================================
+  // Approval System
+  // ===========================================================================
+
+  /**
+   * Post an approval card and wait for the user to approve or deny.
+   *
+   * This method:
+   * 1. Builds and posts a Card with Approve/Deny buttons
+   * 2. Persists the approval state in the StateAdapter (survives restarts)
+   * 3. Returns a Promise that resolves when the user clicks a button
+   * 4. Automatically updates the card to show the decision
+   *
+   * If the server restarts before the user responds, the Promise is lost
+   * but the persisted state remains. Register `bot.onApprovalResponse()`
+   * to handle approvals that arrive after a restart.
+   *
+   * @example Basic usage
+   * ```tsx
+   * const { approved, user } = await thread.requestApproval({
+   *   id: "transfer-123",
+   *   title: "🔒 Transfer Money",
+   *   fields: { Amount: "$500", To: "acct_123" },
+   * });
+   *
+   * if (approved) {
+   *   await transferMoney(500, "acct_123");
+   * }
+   * ```
+   *
+   * @example With AI SDK tool calls
+   * ```tsx
+   * const { approved } = await thread.requestApproval({
+   *   id: toolCall.toolCallId,
+   *   title: `🔒 ${toolCall.toolName}`,
+   *   fields: toolCall.args,
+   *   metadata: { toolCall, history },
+   * });
+   * ```
+   */
+  async requestApproval(
+    options: RequestApprovalOptions
+  ): Promise<ApprovalResult> {
+    const {
+      id,
+      title,
+      description,
+      fields,
+      children,
+      approveLabel,
+      denyLabel,
+      ttlMs = 24 * 60 * 60 * 1000,
+      updateCard = true,
+      metadata,
+    } = options;
+
+    // 1. Validate singleton early — fail before any side effects
+    const chat = getChatSingleton();
+
+    // 2. Register in-memory resolver BEFORE posting the card, so that
+    //    if the user clicks immediately the handler finds the promise.
+    const promise = chat._approvalRegistry.register(id, ttlMs);
+
+    // 3. Persist to state adapter BEFORE posting. The record starts
+    //    without sentMessage so restart-recovery works even if the
+    //    process dies after posting but before the second write.
+    const startTime = Date.now();
+    const storedApproval: StoredApproval = {
+      id,
+      title,
+      fields,
+      metadata,
+      thread: this.toJSON(),
+      adapterName: this.adapter.name,
+      createdAt: new Date(startTime).toISOString(),
+      updateCard,
+    };
+    await storePendingApproval(this._stateAdapter, storedApproval, ttlMs);
+
+    // 4. Build and post the approval card. If posting fails, clean up
+    //    the registry entry and persisted state.
+    const card = buildApprovalCard({
+      id,
+      title,
+      description,
+      fields,
+      children,
+      approveLabel,
+      denyLabel,
+    });
+    let sentMessage: Awaited<ReturnType<typeof this.post>>;
+    try {
+      sentMessage = await this.post(card);
+    } catch (err) {
+      chat._approvalRegistry.remove(id);
+      await this._stateAdapter.delete(`pending-approval:${id}`);
+      throw err;
+    }
+
+    // 5. Update persisted record with sentMessage for card editing on restart.
+    //    Use remaining TTL so the expiry matches the caller's original intent.
+    //    If the process dies here, recovery still works — just can't edit the card.
+    const remainingTtl = Math.max(0, ttlMs - (Date.now() - startTime));
+    await storePendingApproval(
+      this._stateAdapter,
+      { ...storedApproval, sentMessage: sentMessage.toJSON() },
+      remainingTtl
+    );
+
+    // 5. When resolved, update the card to show the decision
+    return promise.then(async (result) => {
+      if (updateCard) {
+        try {
+          await sentMessage.edit(
+            buildResolvedCard(title, result.approved, result.user, fields)
+          );
+        } catch {
+          // Some platforms don't support editing — that's fine
+        }
+      }
+      return result;
+    });
+  }
+
+  /**
+   * Run an AI SDK agent with automatic human-in-the-loop approval handling.
+   *
+   * This method:
+   * 1. Calls `agent.generate()` with the provided prompt
+   * 2. Checks if any tool calls need approval (`tool-approval-request` parts)
+   * 3. Posts an approval card for each via `requestApproval()`
+   * 4. Resumes the agent with the user's decisions
+   * 5. Repeats until the agent finishes (no more approval requests)
+   *
+   * @param agent - An AI SDK agent (e.g. `ToolLoopAgent`) or any object with a
+   *   compatible `generate()` method.
+   * @param options - Prompt, approval card callback, and any extra agent options.
+   * @returns The final agent result (call `.fullStream` to stream or `.text` to get text).
+   *
+   * @example Minimal
+   * ```tsx
+   * const result = await thread.runAgent(agent, { prompt: history });
+   * await thread.post(result.fullStream);
+   * ```
+   *
+   * @example With custom approval cards
+   * ```tsx
+   * const result = await thread.runAgent(agent, {
+   *   prompt: history,
+   *   approvalCard: (toolCall) => ({
+   *     title: `🔒 Confirm ${toolCall.toolName}`,
+   *     fields: toolCall.input,
+   *   }),
+   * });
+   * await thread.post(result.fullStream);
+   * ```
+   */
+  async runAgent(
+    agent: AgentLike,
+    options: RunAgentOptions
+  ): Promise<AgentResultLike> {
+    const { approvalCard, prompt, ...agentOptions } = options;
+    const cardBuilder = approvalCard ?? defaultApprovalCard;
+
+    // Initial agent call
+    let result = await agent.generate({ prompt, ...agentOptions });
+
+    // Loop: keep resolving approvals until the agent finishes
+    while (true) {
+      // Find all tool-approval-request parts in the result
+      const approvalRequests = result.content.filter(
+        (
+          part
+        ): part is {
+          type: "tool-approval-request";
+          approvalId: string;
+          toolCall: {
+            toolName: string;
+            toolCallId: string;
+            input: Record<string, unknown>;
+          };
+        } => part.type === "tool-approval-request"
+      );
+
+      // No approvals needed — agent is done
+      if (approvalRequests.length === 0) {
+        break;
+      }
+
+      // Request approval for each tool call (in parallel)
+      const responses = await Promise.all(
+        approvalRequests.map(async (part) => {
+          const cardOpts = cardBuilder(part.toolCall);
+
+          const { approved, reason } = await this.requestApproval({
+            id: part.approvalId,
+            ...cardOpts,
+          });
+
+          return {
+            type: "tool-approval-response" as const,
+            approvalId: part.approvalId,
+            approved,
+            ...(reason !== undefined && { reason }),
+          };
+        })
+      );
+
+      // Resume the agent with approval responses wrapped in a tool-role message
+      result = await agent.generate({
+        messages: [
+          ...result.response.messages,
+          { role: "tool" as const, content: responses },
+        ],
+        ...agentOptions,
+      });
+    }
+
+    return result;
   }
 
   /**

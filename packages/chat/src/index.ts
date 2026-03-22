@@ -10,6 +10,24 @@ export {
   type AiUserMessage,
   toAiMessages,
 } from "./ai";
+export type {
+  AgentLike,
+  AgentResultLike,
+  ApprovalCardCallback,
+  ApprovalCardOptions,
+  ApprovalResponseEvent,
+  ApprovalResponseHandler,
+  ApprovalResult,
+  RequestApprovalOptions,
+  RunAgentOptions,
+} from "./approval";
+// Approval system
+export {
+  buildApprovalCard,
+  defaultApprovalCard,
+  isApprovalActionId,
+  parseApprovalAction,
+} from "./approval";
 export {
   ChannelImpl,
   deriveChannelId,

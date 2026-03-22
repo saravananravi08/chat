@@ -1,3 +1,12 @@
+import {
+  ApprovalRegistry,
+  type ApprovalResponseHandler,
+  type ApprovalResult,
+  buildResolvedCard,
+  consumePendingApproval,
+  isApprovalActionId,
+  parseApprovalAction,
+} from "./approval";
 import { ChannelImpl, type SerializedChannel } from "./channel";
 import {
   getChatSingleton,
@@ -188,6 +197,11 @@ export class Chat<
   private readonly _dedupeTtlMs: number;
   private readonly _onLockConflict: ChatConfig["onLockConflict"];
   private readonly _messageHistory: MessageHistoryCache;
+
+  /** In-memory registry for pending approval promises */
+  readonly _approvalRegistry = new ApprovalRegistry();
+  /** User-registered handler for approval responses after server restart */
+  private _approvalResponseHandler?: ApprovalResponseHandler;
 
   private readonly mentionHandlers: MentionHandler<TState>[] = [];
   private readonly directMessageHandlers: DirectMessageHandler<TState>[] = [];
@@ -538,6 +552,36 @@ export class Chat<
       this.actionHandlers.push({ actionIds, handler });
       this.logger.debug("Registered action handler", { actionIds });
     }
+  }
+
+  /**
+   * Register a handler for approval responses that arrive after a server restart.
+   *
+   * In the normal flow, `thread.requestApproval()` returns a Promise that resolves
+   * when the user clicks Approve or Deny. But if the server restarts before that
+   * happens, the Promise is lost. This handler is called instead, with the full
+   * context from the original `requestApproval()` call (including metadata).
+   *
+   * @example
+   * ```ts
+   * bot.onApprovalResponse(async ({ id, approved, metadata, event }) => {
+   *   if (!metadata || !event.thread) return;
+   *
+   *   const { toolCallId, history } = metadata;
+   *   const resumed = await agent.generate({
+   *     messages: [...history, {
+   *       type: "tool-approval-response",
+   *       approvalId: id,
+   *       approved,
+   *     }],
+   *   });
+   *   await event.thread.post(resumed.fullStream);
+   * });
+   * ```
+   */
+  onApprovalResponse(handler: ApprovalResponseHandler): void {
+    this._approvalResponseHandler = handler;
+    this.logger.debug("Registered approval response handler");
   }
 
   onModalSubmit(handler: ModalSubmitHandler): void;
@@ -1247,6 +1291,14 @@ export class Chat<
       },
     };
 
+    // ─── Approval interception (runs BEFORE user-registered handlers) ───
+    // Actions with the __approval: prefix are owned by the approval system.
+    // They are intercepted here and NOT propagated to user onAction handlers.
+    if (isApprovalActionId(event.actionId)) {
+      await this.handleApprovalAction(fullEvent);
+      return;
+    }
+
     // Run matching handlers
     this.logger.debug("Checking action handlers", {
       handlerCount: this.actionHandlers.length,
@@ -1267,6 +1319,104 @@ export class Chat<
           actionId: event.actionId,
         });
         await handler(fullEvent);
+      }
+    }
+  }
+
+  /**
+   * Handle an approval button click.
+   *
+   * 1. Parse the action ID to get the approval ID and decision
+   * 2. Consume the persisted approval from the state adapter (prevents double-clicks)
+   * 3. Try to resolve the in-memory promise (same process — happy path)
+   * 4. If no promise found (server restarted), call onApprovalResponse handler
+   * 5. Update the original card to show the decision
+   */
+  private async handleApprovalAction(event: ActionEvent): Promise<void> {
+    const parsed = parseApprovalAction(event.actionId);
+    if (!parsed) {
+      return;
+    }
+
+    const { id, approved } = parsed;
+
+    this.logger.debug("Handling approval action", {
+      id,
+      approved,
+      user: event.user.userName,
+    });
+
+    // Consume from state adapter (also prevents double-clicks)
+    const stored = await consumePendingApproval(this._stateAdapter, id);
+
+    const result: ApprovalResult = {
+      id,
+      approved,
+      user: event.user,
+      metadata: stored?.metadata,
+    };
+
+    // Try in-memory first (same process, happy path)
+    const resolvedInMemory = this._approvalRegistry.resolve(id, result);
+
+    if (resolvedInMemory) {
+      // The promise in requestApproval() was resolved — it handles the card update
+      this.logger.debug("Approval resolved in-memory", { id, approved });
+      return;
+    }
+
+    // ── Restart recovery path ──
+    // The in-memory promise is gone (server restarted), but the state adapter
+    // had the persisted approval data.
+    this.logger.info("Approval resolved via state adapter (restart recovery)", {
+      id,
+      approved,
+    });
+
+    // Update the original card to show the decision
+    if (stored?.updateCard && stored.sentMessage && event.thread) {
+      try {
+        const resolvedCard = buildResolvedCard(
+          stored.title,
+          approved,
+          event.user,
+          stored.fields
+        );
+        const thread = event.thread as ThreadImpl<TState>;
+        const message = Message.fromJSON(stored.sentMessage);
+        const sentMessage = thread.createSentMessageFromMessage(message);
+        await sentMessage.edit(resolvedCard);
+      } catch (err) {
+        this.logger.warn("Failed to update approval card after restart", {
+          id,
+          error: err,
+        });
+      }
+    }
+
+    // Call the user's restart recovery handler
+    if (this._approvalResponseHandler) {
+      await this._approvalResponseHandler({
+        id,
+        approved,
+        user: event.user,
+        event,
+        metadata: stored?.metadata,
+      });
+    } else if (!stored) {
+      // No stored approval AND no in-memory promise — must have expired
+      this.logger.warn(
+        "Approval action received but no pending approval found (expired?)",
+        { id }
+      );
+      if (event.thread) {
+        try {
+          await event.thread.post(
+            "This approval request has expired. Please try again."
+          );
+        } catch {
+          // Best effort
+        }
       }
     }
   }

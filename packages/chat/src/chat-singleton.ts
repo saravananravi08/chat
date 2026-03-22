@@ -2,12 +2,15 @@
  * Singleton holder for Chat instance.
  * Separate module to avoid circular dependency between chat.ts and thread.ts.
  */
+import type { ApprovalRegistry } from "./approval";
 import type { Adapter, StateAdapter } from "./types";
 
 /**
  * Interface for the Chat singleton to avoid importing the full Chat class.
  */
 export interface ChatSingleton {
+  /** Get the approval registry for in-memory promise resolution */
+  readonly _approvalRegistry: ApprovalRegistry;
   getAdapter(name: string): Adapter | undefined;
   getState(): StateAdapter;
 }
