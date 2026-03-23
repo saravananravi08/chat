@@ -1,39 +1,46 @@
 /**
- * Type definitions for the WhatsApp adapter.
+ * Type definitions for the WhatsApp adapter (Baileys-based).
  *
- * Based on the WhatsApp Business Cloud API (Meta Graph API).
- * @see https://developers.facebook.com/docs/whatsapp/cloud-api
+ * Uses Baileys (WhiskeySockets/Baileys) for WebSocket-based WhatsApp Web
+ * connectivity instead of Meta's Cloud API.
  */
 
 import type { Logger } from "chat";
+import type {
+  AuthenticationState,
+  WAMessage,
+} from "baileys";
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
 /**
- * WhatsApp adapter configuration.
+ * WhatsApp adapter configuration for Baileys.
  *
- * Requires a System User access token for API calls and an App Secret
- * for webhook signature verification.
- *
- * @see https://developers.facebook.com/docs/whatsapp/cloud-api/get-started
+ * Requires a Baileys auth state (from useMultiFileAuthState or custom).
+ * No Meta Cloud API credentials needed — connects directly via WebSocket.
  */
 export interface WhatsAppAdapterConfig {
-  /** Access token (System User token) for WhatsApp Cloud API calls */
-  accessToken: string;
-  /** Meta Graph API version (default: "v21.0") */
-  apiVersion?: string;
-  /** Meta App Secret for webhook HMAC-SHA256 signature verification */
-  appSecret: string;
+  /** Baileys authentication state (creds + keys) */
+  auth: AuthenticationState;
   /** Logger instance for error reporting */
   logger: Logger;
-  /** WhatsApp Business phone number ID (not the phone number itself) */
-  phoneNumberId: string;
   /** Bot display name used for identification */
   userName: string;
-  /** Verify token for webhook challenge-response verification */
-  verifyToken: string;
+  /** Path to store auth credentials (used if auth is not provided) */
+  authDir?: string;
+  /** Whether to print QR code to terminal for pairing (default: true) */
+  printQRInTerminal?: boolean;
+  /** Country code for phone number handling (default: "1") */
+  countryCode?: string;
+  /**
+   * Callback invoked when Baileys credentials update.
+   * Must persist the updated state (e.g. call saveCreds from useMultiFileAuthState).
+   */
+  onCredsUpdate?: () => Promise<void>;
+  /** Custom Baileys socket options (merged with defaults) */
+  socketOptions?: Record<string, unknown>;
 }
 
 // =============================================================================
@@ -41,263 +48,17 @@ export interface WhatsAppAdapterConfig {
 // =============================================================================
 
 /**
- * Decoded thread ID for WhatsApp.
+ * Decoded thread ID for WhatsApp (Baileys).
  *
- * WhatsApp conversations are always 1:1 between a business phone number
- * and a user. There is no concept of threads or channels.
+ * Baileys uses JIDs (Jabber IDs) to identify chats.
+ * Format: baileys:{jid}
  *
- * Format: whatsapp:{phoneNumberId}:{userWaId}
+ * - 1:1 DMs use `{phone}@s.whatsapp.net`
+ * - Groups use `{id}@g.us`
  */
 export interface WhatsAppThreadId {
-  /** Business phone number ID */
-  phoneNumberId: string;
-  /** User's WhatsApp ID (their phone number) */
-  userWaId: string;
-}
-
-// =============================================================================
-// Webhook Payloads
-// =============================================================================
-
-/**
- * Top-level webhook notification envelope from Meta.
- *
- * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components
- */
-export interface WhatsAppWebhookPayload {
-  entry: WhatsAppWebhookEntry[];
-  object: "whatsapp_business_account";
-}
-
-/**
- * A single entry in the webhook notification.
- */
-export interface WhatsAppWebhookEntry {
-  changes: WhatsAppWebhookChange[];
-  id: string;
-}
-
-/**
- * A change object containing the actual event data.
- */
-export interface WhatsAppWebhookChange {
-  field: "messages";
-  value: WhatsAppWebhookValue;
-}
-
-/**
- * The value payload containing messages, contacts, and statuses.
- */
-export interface WhatsAppWebhookValue {
-  contacts?: WhatsAppContact[];
-  messages?: WhatsAppInboundMessage[];
-  messaging_product: "whatsapp";
-  metadata: {
-    display_phone_number: string;
-    phone_number_id: string;
-  };
-  statuses?: WhatsAppStatus[];
-}
-
-/**
- * Contact information from an inbound message.
- */
-export interface WhatsAppContact {
-  profile: { name: string };
-  wa_id: string;
-}
-
-/**
- * Inbound message from a user.
- *
- * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-examples
- */
-export interface WhatsAppInboundMessage {
-  /** Audio message content */
-  audio?: {
-    id: string;
-    mime_type: string;
-    sha256: string;
-    voice?: boolean;
-  };
-  /** Legacy button response (from template quick replies) */
-  button?: {
-    payload: string;
-    text: string;
-  };
-  /** Context for quoted replies */
-  context?: {
-    from: string;
-    id: string;
-  };
-  /** Document message content */
-  document?: {
-    caption?: string;
-    filename?: string;
-    id: string;
-    mime_type: string;
-    sha256: string;
-  };
-  /** Sender's WhatsApp ID */
-  from: string;
-  /** Unique message ID */
-  id: string;
-  /** Image message content */
-  image?: {
-    caption?: string;
-    id: string;
-    mime_type: string;
-    sha256: string;
-  };
-  /** Interactive message reply */
-  interactive?: {
-    button_reply?: {
-      id: string;
-      title: string;
-    };
-    list_reply?: {
-      description?: string;
-      id: string;
-      title: string;
-    };
-    type: "button_reply" | "list_reply";
-  };
-  /** Location message content */
-  location?: {
-    address?: string;
-    latitude: number;
-    longitude: number;
-    name?: string;
-    url?: string;
-  };
-  /** Reaction to a message */
-  reaction?: {
-    emoji: string;
-    message_id: string;
-  };
-  /** Sticker message content */
-  sticker?: {
-    animated: boolean;
-    id: string;
-    mime_type: string;
-    sha256: string;
-  };
-  /** Text message content */
-  text?: {
-    body: string;
-  };
-  /** Unix timestamp string */
-  timestamp: string;
-  /** Message type */
-  type:
-    | "text"
-    | "image"
-    | "document"
-    | "audio"
-    | "video"
-    | "voice"
-    | "sticker"
-    | "location"
-    | "contacts"
-    | "interactive"
-    | "button"
-    | "reaction"
-    | "order"
-    | "system";
-  /** Video message content */
-  video?: {
-    caption?: string;
-    id: string;
-    mime_type: string;
-    sha256: string;
-  };
-  /** Voice message content */
-  voice?: {
-    id: string;
-    mime_type: string;
-    sha256: string;
-  };
-}
-
-/**
- * Response from the media URL endpoint.
- *
- * @see https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media#get-media-url
- */
-export interface WhatsAppMediaResponse {
-  file_size: number;
-  id: string;
-  messaging_product: "whatsapp";
-  mime_type: string;
-  sha256: string;
-  url: string;
-}
-
-/**
- * Message delivery/read status update.
- */
-export interface WhatsAppStatus {
-  conversation?: {
-    expiration_timestamp?: string;
-    id: string;
-    origin: { type: string };
-  };
-  id: string;
-  pricing?: {
-    billable: boolean;
-    category: string;
-    pricing_model: string;
-  };
-  recipient_id: string;
-  status: "sent" | "delivered" | "read" | "failed";
-  timestamp: string;
-}
-
-// =============================================================================
-// API Response Types
-// =============================================================================
-
-/**
- * Response from sending a message via the Cloud API.
- */
-export interface WhatsAppSendResponse {
-  contacts: Array<{ input: string; wa_id: string }>;
-  messages: Array<{ id: string }>;
-  messaging_product: "whatsapp";
-}
-
-/**
- * Interactive message payload for sending buttons or lists.
- */
-export interface WhatsAppInteractiveMessage {
-  action:
-    | {
-        button?: never;
-        buttons: Array<{
-          reply: {
-            id: string;
-            title: string;
-          };
-          type: "reply";
-        }>;
-        sections?: never;
-      }
-    | {
-        button: string;
-        buttons?: never;
-        sections: Array<{
-          rows: Array<{
-            description?: string;
-            id: string;
-            title: string;
-          }>;
-          title: string;
-        }>;
-      };
-  body: { text: string };
-  footer?: { text: string };
-  header?: { text: string; type: "text" };
-  type: "button" | "list";
+  /** Full Baileys JID (e.g. "15551234567@s.whatsapp.net" or "120363021234567890@g.us") */
+  jid: string;
 }
 
 // =============================================================================
@@ -305,13 +66,17 @@ export interface WhatsAppInteractiveMessage {
 // =============================================================================
 
 /**
- * Platform-specific raw message type for WhatsApp.
+ * Platform-specific raw message type wrapping Baileys WAMessage.
  */
 export interface WhatsAppRawMessage {
-  /** Contact info from the webhook */
-  contact?: WhatsAppContact;
-  /** The raw inbound message data */
-  message: WhatsAppInboundMessage;
-  /** Phone number ID that received the message */
-  phoneNumberId: string;
+  /** The raw Baileys WAMessage */
+  message: WAMessage;
+  /** Sender's push name (display name) */
+  pushName?: string;
 }
+
+// =============================================================================
+// Re-exports from Baileys for convenience
+// =============================================================================
+
+export type { WAMessage, AuthenticationState };

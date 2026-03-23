@@ -1,7 +1,7 @@
 {
   "name": "@chat-adapter/whatsapp",
   "version": "4.20.2",
-  "description": "WhatsApp adapter for chat - WhatsApp Business Cloud API",
+  "description": "WhatsApp adapter for chat - powered by Baileys (WhatsApp Web API)",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -24,7 +24,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chat-adapter/shared": "workspace:*"
+    "@chat-adapter/shared": "workspace:*",
+    "baileys": "^7.0.0-rc.9"
   },
   "peerDependencies": {
     "chat": "workspace:*"
@@ -37,12 +38,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vercel/chat.git",
+    "url": "git+https://github.com/saravananravi08/chat.git",
     "directory": "packages/adapter-whatsapp"
   },
-  "homepage": "https://github.com/vercel/chat#readme",
+  "homepage": "https://github.com/saravananravi08/chat#readme",
   "bugs": {
-    "url": "https://github.com/vercel/chat/issues"
+    "url": "https://github.com/saravananravi08/chat/issues"
   },
   "publishConfig": {
     "access": "public"
@@ -53,8 +54,8 @@
     "bot",
     "adapter",
     "messaging",
-    "meta",
-    "cloud-api"
+    "baileys",
+    "websocket"
   ],
   "license": "MIT"
 }

@@ -1,4 +1,3 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { extractCard, ValidationError } from "@chat-adapter/shared";
 import type {
   Adapter,
@@ -25,24 +24,27 @@ import {
   getEmoji,
   Message,
 } from "chat";
+import makeWASocket, {
+  downloadMediaMessage,
+  getContentType,
+  isJidGroup,
+  jidNormalizedUser,
+  areJidsSameUser,
+  type WAMessage,
+  type WASocket,
+  type AuthenticationState,
+  type BaileysEventMap,
+  proto,
+} from "baileys";
 import { cardToWhatsApp, decodeWhatsAppCallbackData } from "./cards";
 import { WhatsAppFormatConverter } from "./markdown";
 import type {
   WhatsAppAdapterConfig,
-  WhatsAppContact,
-  WhatsAppInboundMessage,
-  WhatsAppInteractiveMessage,
-  WhatsAppMediaResponse,
   WhatsAppRawMessage,
-  WhatsAppSendResponse,
   WhatsAppThreadId,
-  WhatsAppWebhookPayload,
 } from "./types";
 
-/** Default Graph API version */
-const DEFAULT_API_VERSION = "v21.0";
-
-/** Maximum message length for WhatsApp Cloud API */
+/** Maximum message length for WhatsApp */
 const WHATSAPP_MESSAGE_LIMIT = 4096;
 
 /**
@@ -86,27 +88,35 @@ export function splitMessage(text: string): string[] {
 // Re-export types
 export type {
   WhatsAppAdapterConfig,
-  WhatsAppMediaResponse,
   WhatsAppRawMessage,
   WhatsAppThreadId,
 } from "./types";
 
 /**
- * WhatsApp adapter for chat SDK.
+ * WhatsApp adapter for Chat SDK, powered by Baileys.
  *
- * Supports messaging via the WhatsApp Business Cloud API (Meta Graph API).
- * All conversations are 1:1 DMs between the business phone number and users.
+ * Connects to WhatsApp via WebSocket (WhatsApp Web protocol) using Baileys.
+ * Supports both 1:1 DMs and group chats.
+ *
+ * **Important:** This uses an unofficial API. WhatsApp may ban accounts
+ * that violate their Terms of Service. Use responsibly.
  *
  * @example
  * ```typescript
  * import { Chat } from "chat";
  * import { createWhatsAppAdapter } from "@chat-adapter/whatsapp";
+ * import { useMultiFileAuthState } from "baileys";
  * import { MemoryState } from "@chat-adapter/state-memory";
+ *
+ * const { state, saveCreds } = await useMultiFileAuthState("auth_store");
  *
  * const chat = new Chat({
  *   userName: "my-bot",
  *   adapters: {
- *     whatsapp: createWhatsAppAdapter(),
+ *     whatsapp: createWhatsAppAdapter({
+ *       auth: state,
+ *       onCredsUpdate: saveCreds,
+ *     }),
  *   },
  *   state: new MemoryState(),
  * });
@@ -119,248 +129,204 @@ export class WhatsAppAdapter
   readonly persistMessageHistory = true;
   readonly userName: string;
 
-  private readonly accessToken: string;
-  private readonly appSecret: string;
-  private readonly phoneNumberId: string;
-  private readonly verifyToken: string;
-  private readonly graphApiUrl: string;
   private chat: ChatInstance | null = null;
+  private sock: WASocket | null = null;
+  private readonly auth: AuthenticationState;
   private readonly logger: Logger;
-  private _botUserId: string | null = null;
   private readonly formatConverter = new WhatsAppFormatConverter();
+  private _botUserId: string | null = null;
+  private readonly printQRInTerminal: boolean;
+  private readonly countryCode: string;
+  private readonly onCredsUpdate?: () => Promise<void>;
+  private readonly socketOptions?: Record<string, unknown>;
 
-  /** Bot user ID used for self-message detection */
+  /** Bot user ID (own JID) used for self-message detection */
   get botUserId(): string | undefined {
     return this._botUserId ?? undefined;
   }
 
   constructor(config: WhatsAppAdapterConfig) {
-    this.accessToken = config.accessToken;
-    this.appSecret = config.appSecret;
-    this.phoneNumberId = config.phoneNumberId;
-    this.verifyToken = config.verifyToken;
+    this.auth = config.auth;
     this.logger = config.logger;
     this.userName = config.userName;
-    const apiVersion = config.apiVersion ?? DEFAULT_API_VERSION;
-    this.graphApiUrl = `https://graph.facebook.com/${apiVersion}`;
+    this.printQRInTerminal = config.printQRInTerminal ?? true;
+    this.countryCode = config.countryCode ?? "1";
+    this.onCredsUpdate = config.onCredsUpdate;
+    this.socketOptions = config.socketOptions;
   }
 
   /**
-   * Initialize the adapter and fetch business profile info.
+   * Initialize the adapter: create Baileys socket and register event listeners.
    */
   async initialize(chat: ChatInstance): Promise<void> {
     this.chat = chat;
 
-    // The bot's "user ID" is the phone number ID
-    this._botUserId = this.phoneNumberId;
-    this.logger.info("WhatsApp adapter initialized", {
-      phoneNumberId: this.phoneNumberId,
+    this.sock = makeWASocket({
+      auth: this.auth,
+      printQRInTerminal: this.printQRInTerminal,
+      countryCode: this.countryCode,
+      ...this.socketOptions,
     });
+
+    this.registerEventListeners();
+
+    this.logger.info("WhatsApp Baileys adapter initialized");
   }
 
   /**
-   * Handle incoming webhook from WhatsApp.
-   *
-   * Handles both the GET verification challenge and POST event notifications.
-   *
-   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/guides/set-up-webhooks
+   * Register Baileys event listeners to bridge events to Chat SDK.
    */
-  async handleWebhook(
-    request: Request,
-    options?: WebhookOptions
-  ): Promise<Response> {
-    // Handle webhook verification challenge (GET request)
-    if (request.method === "GET") {
-      return this.handleVerificationChallenge(request);
-    }
+  private registerEventListeners(): void {
+    if (!this.sock) return;
 
-    const body = await request.text();
-    this.logger.debug("WhatsApp webhook raw body", {
-      body: body.substring(0, 500),
+    const sock = this.sock;
+
+    // Connection state changes
+    sock.ev.on("connection.update", (update) => {
+      const { connection, lastDisconnect } = update;
+
+      if (connection === "open") {
+        // Extract our own JID once connected
+        this._botUserId = sock.user
+          ? jidNormalizedUser(sock.user.id)
+          : null;
+        this.logger.info("WhatsApp connected", {
+          botUserId: this._botUserId,
+        });
+      }
+
+      if (connection === "close") {
+        const statusCode =
+          (lastDisconnect?.error as any)?.output?.statusCode;
+        const shouldReconnect = statusCode !== 401;
+        this.logger.warn("WhatsApp connection closed", {
+          statusCode,
+          shouldReconnect,
+        });
+
+        if (shouldReconnect) {
+          // Reconnect by re-creating socket
+          this.sock = makeWASocket({
+            auth: this.auth,
+            printQRInTerminal: this.printQRInTerminal,
+            countryCode: this.countryCode,
+            ...this.socketOptions,
+          });
+          this.registerEventListeners();
+        }
+      }
     });
 
-    // Verify request signature (X-Hub-Signature-256 header)
-    const signature = request.headers.get("x-hub-signature-256");
-    if (!this.verifySignature(body, signature)) {
-      return new Response("Invalid signature", { status: 401 });
-    }
+    // Persist credentials on update
+    sock.ev.on("creds.update", async () => {
+      if (this.onCredsUpdate) {
+        await this.onCredsUpdate();
+      }
+    });
 
-    // Parse the JSON payload
-    let payload: WhatsAppWebhookPayload;
-    try {
-      payload = JSON.parse(body);
-    } catch {
-      this.logger.error("WhatsApp webhook invalid JSON", {
-        contentType: request.headers.get("content-type"),
-        bodyPreview: body.substring(0, 200),
-      });
-      return new Response("Invalid JSON", { status: 400 });
-    }
+    // Incoming messages
+    sock.ev.on("messages.upsert", ({ messages, type }) => {
+      if (type !== "notify") return;
 
-    // Process entries
-    for (const entry of payload.entry) {
-      for (const change of entry.changes) {
-        if (change.field !== "messages") {
-          continue;
+      for (const msg of messages) {
+        try {
+          this.handleInboundMessage(msg);
+        } catch (error) {
+          this.logger.error("Failed to handle inbound message", {
+            messageId: msg.key.id,
+            error,
+          });
         }
+      }
+    });
 
-        const { value } = change;
-
-        // Process incoming messages
-        if (value.messages) {
-          for (const message of value.messages) {
-            try {
-              this.handleInboundMessage(
-                message,
-                value.contacts?.[0],
-                value.metadata.phone_number_id,
-                options
-              );
-            } catch (error) {
-              this.logger.error("Failed to handle inbound message", {
-                messageId: message.id,
-                error,
-              });
-            }
+    // Reactions
+    sock.ev.on(
+      "messages.reaction",
+      (reactions: BaileysEventMap["messages.reaction"]) => {
+        for (const { key, reaction } of reactions) {
+          try {
+            this.handleReaction(key, reaction);
+          } catch (error) {
+            this.logger.error("Failed to handle reaction", {
+              messageId: key.id,
+              error,
+            });
           }
         }
       }
-    }
-
-    return new Response("ok", { status: 200 });
+    );
   }
 
   /**
-   * Handle the webhook verification challenge from Meta.
+   * Handle incoming webhook requests.
    *
-   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/guides/set-up-webhooks
+   * Baileys uses WebSocket, not HTTP webhooks. Returns 501 Not Implemented.
+   * Events are received via the WebSocket connection in registerEventListeners().
    */
-  private handleVerificationChallenge(request: Request): Response {
-    const url = new URL(request.url);
-    const mode = url.searchParams.get("hub.mode");
-    const token = url.searchParams.get("hub.verify_token");
-    const challenge = url.searchParams.get("hub.challenge");
-
-    if (mode === "subscribe" && token === this.verifyToken) {
-      this.logger.info("WhatsApp webhook verification succeeded");
-      return new Response(challenge ?? "", { status: 200 });
-    }
-
-    this.logger.warn("WhatsApp webhook verification failed", {
-      mode,
-      tokenMatch: token === this.verifyToken,
-    });
-    return new Response("Forbidden", { status: 403 });
+  async handleWebhook(
+    _request: Request,
+    _options?: WebhookOptions
+  ): Promise<Response> {
+    return new Response(
+      "Not applicable — Baileys uses WebSocket, not HTTP webhooks",
+      { status: 501 }
+    );
   }
 
   /**
-   * Verify webhook signature using HMAC-SHA256 with the App Secret.
-   *
-   * @see https://developers.facebook.com/docs/graph-api/webhooks/getting-started#verification-requests
+   * Handle an inbound message from Baileys.
    */
-  private verifySignature(body: string, signature: string | null): boolean {
-    if (!signature) {
-      return false;
-    }
+  private handleInboundMessage(waMsg: WAMessage): void {
+    if (!this.chat) return;
 
-    const expectedSignature = `sha256=${createHmac("sha256", this.appSecret).update(body).digest("hex")}`;
+    const jid = waMsg.key.remoteJid;
+    if (!jid) return;
 
-    try {
-      return timingSafeEqual(
-        Buffer.from(signature),
-        Buffer.from(expectedSignature)
-      );
-    } catch {
-      return false;
-    }
-  }
+    // Skip our own messages
+    if (waMsg.key.fromMe) return;
 
-  /**
-   * Handle an inbound message from a user.
-   */
-  private handleInboundMessage(
-    inbound: WhatsAppInboundMessage,
-    contact: WhatsAppContact | undefined,
-    phoneNumberId: string,
-    options?: WebhookOptions
-  ): void {
-    if (!this.chat) {
-      this.logger.warn("Chat instance not initialized, ignoring message");
-      return;
-    }
+    // Skip status broadcasts
+    if (jid === "status@broadcast") return;
 
-    // Handle reactions separately
-    if (inbound.type === "reaction" && inbound.reaction) {
-      this.handleReaction(inbound, contact, phoneNumberId, options);
-      return;
-    }
-
-    // Handle interactive message replies (button clicks)
-    if (inbound.type === "interactive" && inbound.interactive) {
-      this.handleInteractiveReply(inbound, contact, phoneNumberId, options);
-      return;
-    }
-
-    // Handle legacy button responses (from template quick replies)
-    if (inbound.type === "button" && inbound.button) {
-      this.handleButtonResponse(inbound, contact, phoneNumberId, options);
-      return;
-    }
-
-    // Extract text content based on message type
-    const text = this.extractTextContent(inbound);
+    // Extract text content
+    const text = this.extractTextContent(waMsg);
     if (text === null) {
       this.logger.debug("Unsupported message type, ignoring", {
-        type: inbound.type,
-        messageId: inbound.id,
+        messageId: waMsg.key.id,
       });
       return;
     }
 
-    const threadId = this.encodeThreadId({
-      phoneNumberId,
-      userWaId: inbound.from,
-    });
-
-    const message = this.buildMessage(
-      inbound,
-      contact,
-      threadId,
-      text,
-      phoneNumberId
-    );
-    this.chat.processMessage(this, threadId, message, options);
+    const threadId = this.encodeThreadId({ jid: jidNormalizedUser(jid) });
+    const message = this.buildMessage(waMsg, threadId, text);
+    this.chat.processMessage(this, threadId, message);
   }
 
   /**
-   * Handle reaction events.
+   * Handle reaction events from Baileys.
    */
   private handleReaction(
-    inbound: WhatsAppInboundMessage,
-    contact: WhatsAppContact | undefined,
-    phoneNumberId: string,
-    options?: WebhookOptions
+    key: proto.IMessageKey,
+    reaction: proto.IReaction
   ): void {
-    if (!(this.chat && inbound.reaction)) {
-      return;
-    }
+    if (!this.chat) return;
 
-    const threadId = this.encodeThreadId({
-      phoneNumberId,
-      userWaId: inbound.from,
-    });
+    const jid = key.remoteJid;
+    if (!jid) return;
 
-    const rawEmoji = inbound.reaction.emoji;
-    // Empty emoji means reaction was removed
+    const threadId = this.encodeThreadId({ jid: jidNormalizedUser(jid) });
+    const rawEmoji = reaction.text ?? "";
     const added = rawEmoji !== "";
     const emojiValue = added ? getEmoji(rawEmoji) : getEmoji("");
 
+    const senderJid = reaction.key?.participant || reaction.key?.remoteJid || jid;
     const user: Author = {
-      userId: inbound.from,
-      userName: contact?.profile.name || inbound.from,
-      fullName: contact?.profile.name || inbound.from,
+      userId: jidNormalizedUser(senderJid),
+      userName: jidNormalizedUser(senderJid),
+      fullName: jidNormalizedUser(senderJid),
       isBot: false,
-      isMe: false,
+      isMe: areJidsSameUser(senderJid, this._botUserId ?? undefined),
     };
 
     const event: Omit<ReactionEvent, "adapter" | "thread"> = {
@@ -368,136 +334,58 @@ export class WhatsAppAdapter
       rawEmoji,
       added,
       user,
-      messageId: inbound.reaction.message_id,
+      messageId: key.id ?? "",
       threadId,
-      raw: inbound,
+      raw: { message: { key } as WAMessage },
     };
 
-    this.chat.processReaction({ ...event, adapter: this }, options);
+    this.chat.processReaction({ ...event, adapter: this });
   }
 
   /**
-   * Handle interactive message replies (button/list selection).
-   */
-  private handleInteractiveReply(
-    inbound: WhatsAppInboundMessage,
-    contact: WhatsAppContact | undefined,
-    phoneNumberId: string,
-    options?: WebhookOptions
-  ): void {
-    if (!(this.chat && inbound.interactive)) {
-      return;
-    }
-
-    const threadId = this.encodeThreadId({
-      phoneNumberId,
-      userWaId: inbound.from,
-    });
-
-    const { interactive } = inbound;
-    let rawId: string;
-    let fallbackValue: string;
-
-    if (interactive.type === "button_reply" && interactive.button_reply) {
-      rawId = interactive.button_reply.id;
-      fallbackValue = interactive.button_reply.title;
-    } else if (interactive.type === "list_reply" && interactive.list_reply) {
-      rawId = interactive.list_reply.id;
-      fallbackValue = interactive.list_reply.title;
-    } else {
-      return;
-    }
-
-    const { actionId, value } = decodeWhatsAppCallbackData(rawId);
-
-    this.chat.processAction(
-      {
-        adapter: this,
-        actionId,
-        value: value ?? fallbackValue,
-        user: {
-          userId: inbound.from,
-          userName: contact?.profile.name || inbound.from,
-          fullName: contact?.profile.name || inbound.from,
-          isBot: false,
-          isMe: false,
-        },
-        messageId: inbound.id,
-        threadId,
-        raw: inbound,
-      },
-      options
-    );
-  }
-
-  /**
-   * Handle legacy button responses (from template quick replies).
-   */
-  private handleButtonResponse(
-    inbound: WhatsAppInboundMessage,
-    contact: WhatsAppContact | undefined,
-    phoneNumberId: string,
-    options?: WebhookOptions
-  ): void {
-    if (!(this.chat && inbound.button)) {
-      return;
-    }
-
-    const threadId = this.encodeThreadId({
-      phoneNumberId,
-      userWaId: inbound.from,
-    });
-
-    this.chat.processAction(
-      {
-        adapter: this,
-        actionId: inbound.button.payload,
-        value: inbound.button.text,
-        user: {
-          userId: inbound.from,
-          userName: contact?.profile.name || inbound.from,
-          fullName: contact?.profile.name || inbound.from,
-          isBot: false,
-          isMe: false,
-        },
-        messageId: inbound.id,
-        threadId,
-        raw: inbound,
-      },
-      options
-    );
-  }
-
-  /**
-   * Extract text content from an inbound message.
+   * Extract text content from a Baileys WAMessage.
    * Returns null for unsupported message types.
    */
-  private extractTextContent(message: WhatsAppInboundMessage): string | null {
-    switch (message.type) {
-      case "text":
-        return message.text?.body ?? null;
-      case "image":
-        return message.image?.caption ?? "[Image]";
-      case "document":
+  private extractTextContent(waMsg: WAMessage): string | null {
+    const msg = waMsg.message;
+    if (!msg) return null;
+
+    // Handle ephemeral/viewOnce wrappers
+    const inner =
+      msg.ephemeralMessage?.message ||
+      msg.viewOnceMessage?.message ||
+      msg.viewOnceMessageV2?.message ||
+      msg;
+
+    const contentType = getContentType(inner);
+    if (!contentType) return null;
+
+    switch (contentType) {
+      case "conversation":
+        return inner.conversation ?? null;
+      case "extendedTextMessage":
+        return inner.extendedTextMessage?.text ?? null;
+      case "imageMessage":
+        return inner.imageMessage?.caption ?? "[Image]";
+      case "videoMessage":
+        return inner.videoMessage?.caption ?? "[Video]";
+      case "audioMessage":
+        return inner.audioMessage?.ptt ? "[Voice message]" : "[Audio message]";
+      case "documentMessage":
         return (
-          message.document?.caption ??
-          `[Document: ${message.document?.filename ?? "file"}]`
+          inner.documentMessage?.caption ??
+          `[Document: ${inner.documentMessage?.fileName ?? "file"}]`
         );
-      case "audio":
-        return "[Audio message]";
-      case "voice":
-        return "[Voice message]";
-      case "video":
-        return "[Video]";
-      case "sticker":
+      case "stickerMessage":
         return "[Sticker]";
-      case "location": {
-        const loc = message.location;
+      case "locationMessage": {
+        const loc = inner.locationMessage;
         if (loc) {
-          const parts = [`[Location: ${loc.latitude}, ${loc.longitude}`];
-          if (loc.name) {
-            parts[0] = `[Location: ${loc.name}`;
-          }
+          const lat = loc.degreesLatitude;
+          const lng = loc.degreesLongitude;
+          const parts = [
+            `[Location: ${loc.name || `${lat}, ${lng}`}`,
+          ];
           if (loc.address) {
             parts.push(loc.address);
           }
@@ -505,48 +393,59 @@ export class WhatsAppAdapter
         }
         return "[Location]";
       }
+      case "contactMessage":
+        return `[Contact: ${inner.contactMessage?.displayName ?? "Unknown"}]`;
+      case "pollCreationMessage":
+      case "pollCreationMessageV3":
+        return `[Poll: ${inner.pollCreationMessage?.name ?? ""}]`;
       default:
         return null;
     }
   }
 
   /**
-   * Build a Message from a WhatsApp inbound message.
+   * Build a Message from a Baileys WAMessage.
    */
   private buildMessage(
-    inbound: WhatsAppInboundMessage,
-    contact: WhatsAppContact | undefined,
+    waMsg: WAMessage,
     threadId: string,
-    text: string,
-    phoneNumberId?: string
+    text: string
   ): Message<WhatsAppRawMessage> {
+    const senderJid = waMsg.key.participant || waMsg.key.remoteJid || "";
+    const pushName = waMsg.pushName || jidNormalizedUser(senderJid);
+
     const author: Author = {
-      userId: inbound.from,
-      userName: contact?.profile.name || inbound.from,
-      fullName: contact?.profile.name || inbound.from,
+      userId: jidNormalizedUser(senderJid),
+      userName: pushName,
+      fullName: pushName,
       isBot: false,
-      isMe: false,
+      isMe: waMsg.key.fromMe ?? false,
     };
 
     const formatted: FormattedContent = this.formatConverter.toAst(text);
 
     const raw: WhatsAppRawMessage = {
-      message: inbound,
-      contact,
-      phoneNumberId: phoneNumberId || this.phoneNumberId,
+      message: waMsg,
+      pushName: waMsg.pushName ?? undefined,
     };
 
-    const attachments = this.buildAttachments(inbound);
+    const attachments = this.buildAttachments(waMsg);
+
+    const timestamp = waMsg.messageTimestamp
+      ? typeof waMsg.messageTimestamp === "number"
+        ? waMsg.messageTimestamp
+        : Number(waMsg.messageTimestamp)
+      : Math.floor(Date.now() / 1000);
 
     return new Message<WhatsAppRawMessage>({
-      id: inbound.id,
+      id: waMsg.key.id ?? "",
       threadId,
       text,
       formatted,
       raw,
       author,
       metadata: {
-        dateSent: new Date(Number.parseInt(inbound.timestamp, 10) * 1000),
+        dateSent: new Date(timestamp * 1000),
         edited: false,
       },
       attachments,
@@ -554,78 +453,66 @@ export class WhatsAppAdapter
   }
 
   /**
-   * Build attachments from an inbound message.
+   * Build attachments from a Baileys WAMessage.
    */
-  private buildAttachments(inbound: WhatsAppInboundMessage): Attachment[] {
+  private buildAttachments(waMsg: WAMessage): Attachment[] {
     const attachments: Attachment[] = [];
+    const msg = waMsg.message;
+    if (!msg) return attachments;
 
-    if (inbound.image) {
-      attachments.push(
-        this.buildMediaAttachment(
-          inbound.image.id,
-          "image",
-          inbound.image.mime_type
-        )
-      );
+    const inner =
+      msg.ephemeralMessage?.message ||
+      msg.viewOnceMessage?.message ||
+      msg.viewOnceMessageV2?.message ||
+      msg;
+
+    if (inner.imageMessage) {
+      attachments.push({
+        type: "image",
+        mimeType: inner.imageMessage.mimetype ?? "image/jpeg",
+        fetchData: () => this.downloadMedia(waMsg),
+      });
     }
 
-    if (inbound.document) {
-      attachments.push(
-        this.buildMediaAttachment(
-          inbound.document.id,
-          "file",
-          inbound.document.mime_type,
-          inbound.document.filename
-        )
-      );
+    if (inner.documentMessage) {
+      attachments.push({
+        type: "file",
+        mimeType: inner.documentMessage.mimetype ?? "application/octet-stream",
+        name: inner.documentMessage.fileName ?? undefined,
+        fetchData: () => this.downloadMedia(waMsg),
+      });
     }
 
-    if (inbound.audio) {
-      attachments.push(
-        this.buildMediaAttachment(
-          inbound.audio.id,
-          "audio",
-          inbound.audio.mime_type
-        )
-      );
+    if (inner.audioMessage) {
+      attachments.push({
+        type: "audio",
+        mimeType: inner.audioMessage.mimetype ?? "audio/ogg",
+        name: inner.audioMessage.ptt ? "voice" : undefined,
+        fetchData: () => this.downloadMedia(waMsg),
+      });
     }
 
-    if (inbound.video) {
-      attachments.push(
-        this.buildMediaAttachment(
-          inbound.video.id,
-          "video",
-          inbound.video.mime_type
-        )
-      );
+    if (inner.videoMessage) {
+      attachments.push({
+        type: "video",
+        mimeType: inner.videoMessage.mimetype ?? "video/mp4",
+        fetchData: () => this.downloadMedia(waMsg),
+      });
     }
 
-    if (inbound.voice) {
-      attachments.push(
-        this.buildMediaAttachment(
-          inbound.voice.id,
-          "audio",
-          inbound.voice.mime_type,
-          "voice"
-        )
-      );
+    if (inner.stickerMessage) {
+      attachments.push({
+        type: "image",
+        mimeType: inner.stickerMessage.mimetype ?? "image/webp",
+        name: "sticker",
+        fetchData: () => this.downloadMedia(waMsg),
+      });
     }
 
-    if (inbound.sticker) {
-      attachments.push(
-        this.buildMediaAttachment(
-          inbound.sticker.id,
-          "image",
-          inbound.sticker.mime_type,
-          "sticker"
-        )
-      );
-    }
-
-    if (inbound.location) {
-      const loc = inbound.location;
-      const lat = Number(loc.latitude);
-      const lng = Number(loc.longitude);
+    if (inner.locationMessage) {
+      const loc = inner.locationMessage;
+      const lat = Number(loc.degreesLatitude);
+      const lng = Number(loc.degreesLongitude);
       if (Number.isFinite(lat) && Number.isFinite(lng)) {
         const mapUrl = `https://www.google.com/maps?q=${lat},${lng}`;
         attachments.push({
@@ -641,100 +528,47 @@ export class WhatsAppAdapter
   }
 
   /**
-   * Build a single media attachment with a lazy fetchData function.
+   * Download media from a Baileys WAMessage.
    */
-  private buildMediaAttachment(
-    mediaId: string,
-    type: Attachment["type"],
-    mimeType: string,
-    name?: string
-  ): Attachment {
-    return {
-      type,
-      mimeType,
-      name,
-      fetchData: () => this.downloadMedia(mediaId),
-    };
+  async downloadMedia(waMsg: WAMessage): Promise<Buffer> {
+    const buffer = await downloadMediaMessage(waMsg, "buffer", {});
+    return Buffer.from(buffer as Buffer);
   }
 
   /**
-   * Download media from WhatsApp.
-   *
-   * WhatsApp media is fetched in two steps:
-   * 1. GET the media metadata to obtain the download URL
-   * 2. GET the actual binary data from the download URL
-   *
-   * @param mediaId - The media ID from the inbound message
-   * @returns The media data as a Buffer
-   *
-   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media#download-media
-   */
-  async downloadMedia(mediaId: string): Promise<Buffer> {
-    // Step 1: Get the media URL
-    const metaResponse = await fetch(`${this.graphApiUrl}/${mediaId}`, {
-      headers: { Authorization: `Bearer ${this.accessToken}` },
-    });
-
-    if (!metaResponse.ok) {
-      const errorBody = await metaResponse.text();
-      this.logger.error("Failed to get media URL", {
-        status: metaResponse.status,
-        body: errorBody,
-        mediaId,
-      });
-      throw new Error(
-        `Failed to get media URL: ${metaResponse.status} ${errorBody}`
-      );
-    }
-
-    const mediaInfo: WhatsAppMediaResponse =
-      (await metaResponse.json()) as WhatsAppMediaResponse;
-
-    // Step 2: Download the actual file
-    const dataResponse = await fetch(mediaInfo.url, {
-      headers: { Authorization: `Bearer ${this.accessToken}` },
-    });
-
-    if (!dataResponse.ok) {
-      this.logger.error("Failed to download media", {
-        status: dataResponse.status,
-        mediaId,
-      });
-      throw new Error(`Failed to download media: ${dataResponse.status}`);
-    }
-
-    const arrayBuffer = await dataResponse.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  }
-
-  /**
-   * Send a message to a WhatsApp user.
-   *
-   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/messages
+   * Send a message to a WhatsApp chat via Baileys.
    */
   async postMessage(
     threadId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage<WhatsAppRawMessage>> {
-    const { userWaId } = this.decodeThreadId(threadId);
+    if (!this.sock) {
+      throw new Error("WhatsApp adapter not initialized — socket is null");
+    }
+
+    const { jid } = this.decodeThreadId(threadId);
 
     // Check if this is a card with interactive buttons
     const card = extractCard(message);
     if (card) {
       const result = cardToWhatsApp(card);
       if (result.type === "interactive") {
-        // Convert emoji placeholders in interactive message fields
-        const interactive = JSON.parse(
-          convertEmojiPlaceholders(
-            JSON.stringify(result.interactive),
-            "whatsapp"
-          )
-        );
-        return this.sendInteractiveMessage(threadId, userWaId, interactive);
+        // Baileys doesn't have a native interactive message type,
+        // so we send the body text with buttons as a text fallback
+        const bodyText = result.interactive.body.text;
+        const action = result.interactive.action;
+        const buttons = "buttons" in action && action.buttons
+          ? action.buttons
+          : [];
+        const buttonText = buttons
+          .map((b: { reply: { title: string } }, i: number) => `${i + 1}. ${b.reply.title}`)
+          .join("\n");
+        const fullText = `${bodyText}\n\n${buttonText}`;
+        return this.sendTextMessage(threadId, jid, convertEmojiPlaceholders(fullText, "whatsapp"));
       }
       return this.sendTextMessage(
         threadId,
-        userWaId,
+        jid,
         convertEmojiPlaceholders(result.text, "whatsapp")
       );
     }
@@ -744,57 +578,38 @@ export class WhatsAppAdapter
       this.formatConverter.renderPostable(message),
       "whatsapp"
     );
-    return this.sendTextMessage(threadId, userWaId, body);
+    return this.sendTextMessage(threadId, jid, body);
   }
 
   /**
-   * Split text into chunks that fit within WhatsApp's message limit,
-   * breaking on paragraph boundaries (\n\n) when possible, then line
-   * boundaries (\n), and finally at the character limit as a last resort.
+   * Split text into chunks that fit within WhatsApp's message limit.
    */
   splitMessage(text: string): string[] {
     return splitMessage(text);
   }
 
   /**
-   * Send a single text message via the Cloud API (must be within the
-   * 4096-character limit).
+   * Send a single text message via Baileys.
    */
   private async sendSingleTextMessage(
     threadId: string,
-    to: string,
+    jid: string,
     text: string
   ): Promise<RawMessage<WhatsAppRawMessage>> {
-    const response = await this.graphApiRequest<WhatsAppSendResponse>(
-      `/${this.phoneNumberId}/messages`,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "text",
-        text: { preview_url: false, body: text },
-      }
-    );
-
-    if (!(response.messages?.length && response.messages[0]?.id)) {
-      throw new Error(
-        "WhatsApp API did not return a message ID for text message"
-      );
+    if (!this.sock) {
+      throw new Error("WhatsApp adapter not initialized — socket is null");
     }
-    const messageId = response.messages[0].id;
+
+    const sentMsg = await this.sock.sendMessage(jid, { text });
+    if (!sentMsg?.key.id) {
+      throw new Error("Baileys did not return a message ID for text message");
+    }
 
     return {
-      id: messageId,
+      id: sentMsg.key.id,
       threadId,
       raw: {
-        message: {
-          id: messageId,
-          from: this.phoneNumberId,
-          timestamp: String(Math.floor(Date.now() / 1000)),
-          type: "text",
-          text: { body: text },
-        },
-        phoneNumberId: this.phoneNumberId,
+        message: sentMsg,
       },
     };
   }
@@ -805,78 +620,55 @@ export class WhatsAppAdapter
    */
   private async sendTextMessage(
     threadId: string,
-    to: string,
+    jid: string,
     text: string
   ): Promise<RawMessage<WhatsAppRawMessage>> {
     const chunks = this.splitMessage(text);
     let result: RawMessage<WhatsAppRawMessage> | undefined;
 
     for (const chunk of chunks) {
-      result = await this.sendSingleTextMessage(threadId, to, chunk);
+      result = await this.sendSingleTextMessage(threadId, jid, chunk);
     }
 
     return result as RawMessage<WhatsAppRawMessage>;
   }
 
   /**
-   * Send an interactive message (buttons or list) via the Cloud API.
+   * Edit a message via Baileys protocol message editing.
    */
-  private async sendInteractiveMessage(
+  async editMessage(
     threadId: string,
-    to: string,
-    interactive: WhatsAppInteractiveMessage
+    messageId: string,
+    message: AdapterPostableMessage
   ): Promise<RawMessage<WhatsAppRawMessage>> {
-    const response = await this.graphApiRequest<WhatsAppSendResponse>(
-      `/${this.phoneNumberId}/messages`,
-      {
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "interactive",
-        interactive,
-      }
-    );
-
-    if (!(response.messages?.length && response.messages[0]?.id)) {
-      throw new Error(
-        "WhatsApp API did not return a message ID for interactive message"
-      );
+    if (!this.sock) {
+      throw new Error("WhatsApp adapter not initialized — socket is null");
     }
-    const messageId = response.messages[0].id;
+
+    const { jid } = this.decodeThreadId(threadId);
+    const text = this.formatConverter.renderPostable(message);
+
+    const sentMsg = await this.sock.sendMessage(jid, {
+      text,
+      edit: {
+        remoteJid: jid,
+        id: messageId,
+        fromMe: true,
+      },
+    } as any);
 
     return {
-      id: messageId,
+      id: sentMsg?.key.id ?? messageId,
       threadId,
       raw: {
-        message: {
-          id: messageId,
-          from: this.phoneNumberId,
-          timestamp: String(Math.floor(Date.now() / 1000)),
-          type: "interactive",
-        },
-        phoneNumberId: this.phoneNumberId,
+        message: sentMsg as WAMessage,
       },
     };
   }
 
   /**
-   * Edit a message. Not supported by WhatsApp Cloud API — throws an error.
-   *
-   * Callers should use postMessage directly if they want to send a follow-up.
-   */
-  async editMessage(
-    _threadId: string,
-    _messageId: string,
-    _message: AdapterPostableMessage
-  ): Promise<RawMessage<WhatsAppRawMessage>> {
-    throw new Error(
-      "WhatsApp does not support editing messages. Use postMessage to send a new message instead."
-    );
-  }
-
-  /**
    * Stream a message by buffering all chunks and sending as a single message.
-   * WhatsApp doesn't support message editing, so we can't do incremental updates.
+   * Baileys can't do incremental message editing reliably for streaming.
    */
   async stream(
     threadId: string,
@@ -895,85 +687,99 @@ export class WhatsAppAdapter
   }
 
   /**
-   * Delete a message. Not supported by WhatsApp Cloud API — throws an error.
+   * Delete a message via Baileys.
    */
-  async deleteMessage(_threadId: string, _messageId: string): Promise<void> {
-    throw new Error("WhatsApp does not support deleting messages.");
+  async deleteMessage(threadId: string, messageId: string): Promise<void> {
+    if (!this.sock) {
+      throw new Error("WhatsApp adapter not initialized — socket is null");
+    }
+
+    const { jid } = this.decodeThreadId(threadId);
+
+    await this.sock.sendMessage(jid, {
+      delete: {
+        remoteJid: jid,
+        id: messageId,
+        fromMe: true,
+      },
+    });
   }
 
   /**
-   * Add a reaction to a message.
-   *
-   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/messages/reaction-messages
+   * Add a reaction to a message via Baileys.
    */
   async addReaction(
     threadId: string,
     messageId: string,
     emoji: EmojiValue | string
   ): Promise<void> {
-    const { userWaId } = this.decodeThreadId(threadId);
+    if (!this.sock) {
+      throw new Error("WhatsApp adapter not initialized — socket is null");
+    }
+
+    const { jid } = this.decodeThreadId(threadId);
     const emojiStr = this.resolveEmoji(emoji);
 
-    await this.graphApiRequest(`/${this.phoneNumberId}/messages`, {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: userWaId,
-      type: "reaction",
-      reaction: {
-        message_id: messageId,
-        emoji: emojiStr,
+    await this.sock.sendMessage(jid, {
+      react: {
+        text: emojiStr,
+        key: {
+          remoteJid: jid,
+          id: messageId,
+          fromMe: false,
+        },
       },
     });
   }
 
   /**
-   * Remove a reaction from a message.
-   *
-   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/messages/reaction-messages
+   * Remove a reaction from a message via Baileys.
    */
   async removeReaction(
     threadId: string,
     messageId: string,
     _emoji: EmojiValue | string
   ): Promise<void> {
-    const { userWaId } = this.decodeThreadId(threadId);
+    if (!this.sock) {
+      throw new Error("WhatsApp adapter not initialized — socket is null");
+    }
 
-    // WhatsApp removes reactions by sending an empty emoji
-    await this.graphApiRequest(`/${this.phoneNumberId}/messages`, {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: userWaId,
-      type: "reaction",
-      reaction: {
-        message_id: messageId,
-        emoji: "",
+    const { jid } = this.decodeThreadId(threadId);
+
+    // Baileys removes reactions by sending empty text
+    await this.sock.sendMessage(jid, {
+      react: {
+        text: "",
+        key: {
+          remoteJid: jid,
+          id: messageId,
+          fromMe: false,
+        },
       },
     });
   }
 
   /**
-   * Start typing indicator.
-   *
-   * WhatsApp supports typing indicators via the messages endpoint.
-   * The indicator displays for up to 25 seconds or until the next message.
-   *
-   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/messages/mark-messages-as-read
+   * Start typing indicator via Baileys presence update.
    */
-  async startTyping(_threadId: string, _status?: string): Promise<void> {
-    // WhatsApp Cloud API does not support typing indicators.
+  async startTyping(threadId: string, _status?: string): Promise<void> {
+    if (!this.sock) return;
+
+    const { jid } = this.decodeThreadId(threadId);
+    await this.sock.presenceSubscribe(jid);
+    await this.sock.sendPresenceUpdate("composing", jid);
   }
 
   /**
-   * Fetch messages. Not supported by WhatsApp Cloud API.
-   *
-   * WhatsApp does not provide an API to retrieve message history.
+   * Fetch messages. Not supported — WhatsApp doesn't expose server-side history.
+   * Message history is persisted by the Chat SDK state adapter.
    */
   async fetchMessages(
     _threadId: string,
     _options?: FetchOptions
   ): Promise<FetchResult<WhatsAppRawMessage>> {
     this.logger.debug(
-      "fetchMessages not supported on WhatsApp - message history is not available via Cloud API"
+      "fetchMessages not supported on WhatsApp — message history is not available"
     );
     return { messages: [] };
   }
@@ -982,30 +788,31 @@ export class WhatsAppAdapter
    * Fetch thread info.
    */
   async fetchThread(threadId: string): Promise<ThreadInfo> {
-    const { phoneNumberId, userWaId } = this.decodeThreadId(threadId);
+    const { jid } = this.decodeThreadId(threadId);
+    const isGroup = isJidGroup(jid) ?? false;
 
     return {
       id: threadId,
-      channelId: `whatsapp:${phoneNumberId}`,
-      channelName: `WhatsApp: ${userWaId}`,
-      isDM: true,
-      metadata: { phoneNumberId, userWaId },
+      channelId: `whatsapp:${jid}`,
+      channelName: `WhatsApp: ${jid}`,
+      isDM: !isGroup,
+      metadata: { jid },
     };
   }
 
   /**
    * Encode a WhatsApp thread ID.
    *
-   * Format: whatsapp:{phoneNumberId}:{userWaId}
+   * Format: whatsapp:{jid}
    */
   encodeThreadId(platformData: WhatsAppThreadId): string {
-    return `whatsapp:${platformData.phoneNumberId}:${platformData.userWaId}`;
+    return `whatsapp:${platformData.jid}`;
   }
 
   /**
    * Decode a WhatsApp thread ID.
    *
-   * Format: whatsapp:{phoneNumberId}:{userWaId}
+   * Format: whatsapp:{jid}
    */
   decodeThreadId(threadId: string): WhatsAppThreadId {
     if (!threadId.startsWith("whatsapp:")) {
@@ -1015,84 +822,82 @@ export class WhatsAppAdapter
       );
     }
 
-    const withoutPrefix = threadId.slice(9);
-    if (!withoutPrefix) {
+    const jid = threadId.slice(9);
+    if (!jid) {
       throw new ValidationError(
         "whatsapp",
         `Invalid WhatsApp thread ID format: ${threadId}`
       );
     }
 
-    const parts = withoutPrefix.split(":");
-    if (parts.length !== 2 || !parts[0] || !parts[1]) {
-      throw new ValidationError(
-        "whatsapp",
-        `Invalid WhatsApp thread ID format: ${threadId}`
-      );
-    }
-
-    return {
-      phoneNumberId: parts[0],
-      userWaId: parts[1],
-    };
+    return { jid };
   }
 
   /**
    * Derive channel ID from a WhatsApp thread ID.
-   * On WhatsApp every conversation is a 1:1 DM, so channel === thread.
    */
   channelIdFromThreadId(threadId: string): string {
     return threadId;
   }
 
   /**
-   * All WhatsApp conversations are DMs.
+   * Check if a thread is a DM (not a group).
    */
-  isDM(_threadId: string): boolean {
-    return true;
+  isDM(threadId: string): boolean {
+    const { jid } = this.decodeThreadId(threadId);
+    return !isJidGroup(jid);
   }
 
   /**
    * Open a DM with a user. Returns the thread ID for the conversation.
    *
-   * For WhatsApp, this simply constructs the thread ID since all
-   * conversations are inherently DMs. Note: you can only message users
-   * who have messaged you first (within the 24-hour window) or
-   * via approved template messages.
+   * For Baileys, construct the JID from the phone number.
    */
   async openDM(userId: string): Promise<string> {
-    return this.encodeThreadId({
-      phoneNumberId: this.phoneNumberId,
-      userWaId: userId,
-    });
+    // If the userId is already a JID, normalize it
+    const jid = userId.includes("@")
+      ? jidNormalizedUser(userId)
+      : `${userId}@s.whatsapp.net`;
+    return this.encodeThreadId({ jid });
   }
 
   /**
    * Parse platform message format to normalized format.
    */
   parseMessage(raw: WhatsAppRawMessage): Message<WhatsAppRawMessage> {
-    const text = this.extractTextContent(raw.message) || "";
+    const waMsg = raw.message;
+    const text = this.extractTextContent(waMsg) || "";
     const formatted: FormattedContent = this.formatConverter.toAst(text);
-    const attachments = this.buildAttachments(raw.message);
+    const attachments = this.buildAttachments(waMsg);
+
+    const senderJid =
+      waMsg.key.participant || waMsg.key.remoteJid || "";
+    const pushName = raw.pushName || jidNormalizedUser(senderJid);
+
     const threadId = this.encodeThreadId({
-      phoneNumberId: raw.phoneNumberId,
-      userWaId: raw.message.from,
+      jid: jidNormalizedUser(waMsg.key.remoteJid || ""),
     });
 
+    const timestamp = waMsg.messageTimestamp
+      ? typeof waMsg.messageTimestamp === "number"
+        ? waMsg.messageTimestamp
+        : Number(waMsg.messageTimestamp)
+      : Math.floor(Date.now() / 1000);
+
     return new Message<WhatsAppRawMessage>({
-      id: raw.message.id,
+      id: waMsg.key.id ?? "",
       threadId,
       text,
       formatted,
       author: {
-        userId: raw.message.from,
-        userName: raw.contact?.profile.name || raw.message.from,
-        fullName: raw.contact?.profile.name || raw.message.from,
+        userId: jidNormalizedUser(senderJid),
+        userName: pushName,
+        fullName: pushName,
         isBot: false,
-        isMe: raw.message.from === this._botUserId,
+        isMe: areJidsSameUser(senderJid, this._botUserId ?? undefined),
       },
       metadata: {
-        dateSent: new Date(Number.parseInt(raw.message.timestamp, 10) * 1000),
+        dateSent: new Date(timestamp * 1000),
         edited: false,
       },
       attachments,
@@ -1108,49 +913,30 @@ export class WhatsAppAdapter
   }
 
   /**
-   * Mark an inbound message as read.
-   *
-   * @see https://developers.facebook.com/docs/whatsapp/cloud-api/messages/mark-messages-as-read
+   * Mark messages as read via Baileys.
    */
-  async markAsRead(messageId: string): Promise<void> {
-    await this.graphApiRequest(`/${this.phoneNumberId}/messages`, {
-      messaging_product: "whatsapp",
-      status: "read",
-      message_id: messageId,
-    });
+  async markAsRead(threadId: string, messageId: string): Promise<void> {
+    if (!this.sock) return;
+
+    const { jid } = this.decodeThreadId(threadId);
+    await this.sock.readMessages([
+      {
+        remoteJid: jid,
+        id: messageId,
+        fromMe: false,
+      },
+    ]);
   }
 
-  // =============================================================================
-  // Private helpers
-  // =============================================================================
-
   /**
-   * Make a request to the Meta Graph API.
+   * Disconnect the Baileys socket cleanly.
    */
-  private async graphApiRequest<T = unknown>(
-    path: string,
-    body: unknown
-  ): Promise<T> {
-    const response = await fetch(`${this.graphApiUrl}${path}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      this.logger.error("WhatsApp API error", {
-        status: response.status,
-        body: errorBody,
-        path,
-      });
-      throw new Error(`WhatsApp API error: ${response.status} ${errorBody}`);
+  async disconnect(): Promise<void> {
+    if (this.sock) {
+      this.sock.end(undefined);
+      this.sock = null;
     }
-
-    return response.json() as Promise<T>;
+    this.logger.info("WhatsApp Baileys adapter disconnected");
   }
 
   /**
@@ -1162,72 +948,47 @@ export class WhatsAppAdapter
 }
 
 /**
- * Factory function to create a WhatsApp adapter.
+ * Factory function to create a WhatsApp adapter powered by Baileys.
  *
  * @example
  * ```typescript
+ * import { useMultiFileAuthState } from "baileys";
+ *
+ * const { state, saveCreds } = await useMultiFileAuthState("auth_store");
  * const adapter = createWhatsAppAdapter({
- *   accessToken: process.env.WHATSAPP_ACCESS_TOKEN!,
- *   appSecret: process.env.WHATSAPP_APP_SECRET!,
- *   phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID!,
- *   verifyToken: process.env.WHATSAPP_VERIFY_TOKEN!,
+ *   auth: state,
+ *   onCredsUpdate: saveCreds,
  * });
  * ```
  */
-export function createWhatsAppAdapter(config?: {
-  accessToken?: string;
-  apiVersion?: string;
-  appSecret?: string;
+export function createWhatsAppAdapter(config: {
+  auth: AuthenticationState;
+  countryCode?: string;
   logger?: Logger;
-  phoneNumberId?: string;
+  onCredsUpdate?: () => Promise<void>;
+  printQRInTerminal?: boolean;
+  socketOptions?: Record<string, unknown>;
   userName?: string;
-  verifyToken?: string;
 }): WhatsAppAdapter {
-  const logger = config?.logger ?? new ConsoleLogger("info").child("whatsapp");
+  const logger = config.logger ?? new ConsoleLogger("info").child("whatsapp");
 
-  const accessToken = config?.accessToken ?? process.env.WHATSAPP_ACCESS_TOKEN;
-  if (!accessToken) {
+  if (!config.auth) {
     throw new ValidationError(
       "whatsapp",
-      "accessToken is required. Set WHATSAPP_ACCESS_TOKEN or provide it in config."
-    );
-  }
-
-  const appSecret = config?.appSecret ?? process.env.WHATSAPP_APP_SECRET;
-  if (!appSecret) {
-    throw new ValidationError(
-      "whatsapp",
-      "appSecret is required. Set WHATSAPP_APP_SECRET or provide it in config."
-    );
-  }
-
-  const phoneNumberId =
-    config?.phoneNumberId ?? process.env.WHATSAPP_PHONE_NUMBER_ID;
-  if (!phoneNumberId) {
-    throw new ValidationError(
-      "whatsapp",
-      "phoneNumberId is required. Set WHATSAPP_PHONE_NUMBER_ID or provide it in config."
-    );
-  }
-
-  const verifyToken = config?.verifyToken ?? process.env.WHATSAPP_VERIFY_TOKEN;
-  if (!verifyToken) {
-    throw new ValidationError(
-      "whatsapp",
-      "verifyToken is required. Set WHATSAPP_VERIFY_TOKEN or provide it in config."
+      "auth is required. Use useMultiFileAuthState() from baileys to create auth state."
     );
   }
 
   const userName =
-    config?.userName ?? process.env.WHATSAPP_BOT_USERNAME ?? "whatsapp-bot";
+    config.userName ?? process.env.WHATSAPP_BOT_USERNAME ?? "whatsapp-bot";
 
   return new WhatsAppAdapter({
-    accessToken,
-    apiVersion: config?.apiVersion,
-    appSecret,
-    phoneNumberId,
-    verifyToken,
-    userName,
+    auth: config.auth,
     logger,
+    userName,
+    printQRInTerminal: config.printQRInTerminal,
+    countryCode: config.countryCode,
+    onCredsUpdate: config.onCredsUpdate,
+    socketOptions: config.socketOptions,
   });
 }

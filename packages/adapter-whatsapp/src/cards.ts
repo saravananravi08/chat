@@ -18,7 +18,40 @@ import type {
   FieldsElement,
   TextElement,
 } from "chat";
-import type { WhatsAppInteractiveMessage } from "./types";
+/**
+ * Interactive message payload for sending buttons or lists.
+ * Kept for card rendering compatibility — used as an intermediate format.
+ */
+export interface WhatsAppInteractiveMessage {
+  action:
+    | {
+        button?: never;
+        buttons: Array<{
+          reply: {
+            id: string;
+            title: string;
+          };
+          type: "reply";
+        }>;
+        sections?: never;
+      }
+    | {
+        button: string;
+        buttons?: never;
+        sections: Array<{
+          rows: Array<{
+            description?: string;
+            id: string;
+            title: string;
+          }>;
+          title: string;
+        }>;
+      };
+  body: { text: string };
+  footer?: { text: string };
+  header?: { text: string; type: "text" };
+  type: "button" | "list";
+}
 
 const CALLBACK_DATA_PREFIX = "chat:";
 
