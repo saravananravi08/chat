@@ -64,6 +64,7 @@ const agent = new ToolLoopAgent({
 
 // Handle new @mentions of the bot
 bot.onNewMention(async (thread, message) => {
+  'use workflow'
   await thread.subscribe();
 
   // Check if user wants to enable AI mode (mention contains "AI")
@@ -88,6 +89,9 @@ bot.onNewMention(async (thread, message) => {
 
   // Default welcome card
   await thread.startTyping();
+
+  using workflowCallbackHook = createWebhook();
+
   await thread.post(
     <Card
       subtitle={`Connected via ${thread.adapter.name}`}
@@ -125,8 +129,11 @@ bot.onNewMention(async (thread, message) => {
         <Button id="report" value="bug">
           Report Bug
         </Button>
-        <Button id="workflow_modal" style="primary">
+        <Button id="open_modal" style="primary">
           Open Modal
+        </Button>
+        <Button id="workflow_callback" style="primary" callbackUrl={workflowCallbackHook.url}>
+          Workflow Callback
         </Button>
         <LinkButton url="https://vercel.com">Open Link</LinkButton>
         <Button id="goodbye" style="danger">
@@ -134,6 +141,13 @@ bot.onNewMention(async (thread, message) => {
         </Button>
       </Actions>
     </Card>
+  );
+
+  const request = await workflowCallbackHook;
+  const payload = await request.json();
+
+  await thread.post(
+    `${emoji.check} You selected **${JSON.stringify(payload)}**`
   );
 });
 
@@ -352,21 +366,13 @@ bot.onAction("goodbye", async (event) => {
   );
 });
 
-// Workflow-powered modal: clicking "Open Modal" opens a modal with a select.
-// The modal's callbackUrl points to a workflow webhook, so submitting the modal
-// resumes the workflow which then posts the user's selection to the thread.
-bot.onAction("workflow_modal", async (event) => {
-  if (!event.thread) {
-    return;
-  }
-  const { thread } = event;
-
-  using webhook = createWebhook();
-
+bot.onAction("open_modal", async (event) => {
+  'use workflow'
+  using callbackHook = createWebhook();
   await event.openModal(
     <Modal
       callbackId="workflow_modal_form"
-      callbackUrl={webhook.url}
+      callbackUrl={callbackHook.url}
       submitLabel="Submit"
       title="Pick an Option"
     >
@@ -378,10 +384,9 @@ bot.onAction("workflow_modal", async (event) => {
     </Modal>
   );
 
-  const request = await webhook;
+  const request = await callbackHook;
   const payload = await request.json();
-
-  await thread.post(
+  await event.thread?.post(
     `${emoji.check} You selected **${payload.values?.choice ?? "nothing"}**`
   );
 });
